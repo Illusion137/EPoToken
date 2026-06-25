@@ -24,10 +24,10 @@ using placeholder_outcome  = std::variant<std::string, error>;
 } // namespace epotoken
 
 // Generates a full PoToken via BotGuard/V8.
-// visitor_data:     YouTube visitor data string from an Innertube session.
-// content_binding:  What to mint the token for; defaults to visitor_data when empty.
+// Creates a fresh Innertube WEB session internally; no visitor_data required.
+// content_binding: what to mint the token for (e.g. video ID or channel ID).
+//   Defaults to the session's visitor_data when omitted.
 epotoken::po_token_outcome generate_po_token(
-    const std::string& visitor_data,
     const std::string& content_binding = ""
 );
 

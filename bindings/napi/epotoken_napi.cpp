@@ -4,8 +4,8 @@
 // The JS host (index.ts) uses bgutils-js for BotGuard execution, mirroring
 // exactly how potoken.node.ts works in the original TypeScript implementation.
 //
-//   getAttestationChallenge(visitorData: string)
-//     → Promise<{ interpreterUrl, program, globalName }>
+//   getAttestationChallenge()
+//     → Promise<{ interpreterUrl, program, globalName, visitorData }>
 //
 //   postGenerateIT(snapshot: string)
 //     → Promise<string>   (integrity token)
@@ -20,30 +20,28 @@
 #include "../../src/innertube_client.h"
 
 // ---------------------------------------------------------------------------
-// getAttestationChallenge
+// getAttestationChallenge — creates a fresh Innertube session internally
 // ---------------------------------------------------------------------------
 
 class GetChallengeWorker final : public Napi::AsyncWorker {
 public:
-    GetChallengeWorker(Napi::Env env,
-                       Napi::Promise::Deferred deferred,
-                       std::string visitor_data)
+    GetChallengeWorker(Napi::Env env, Napi::Promise::Deferred deferred)
         : Napi::AsyncWorker(env)
         , deferred_(std::move(deferred))
-        , visitor_data_(std::move(visitor_data))
     {}
 
     void Execute() override {
-        result_ = epotoken::get_attestation_challenge(visitor_data_);
+        result_ = epotoken::get_attestation_challenge();
     }
 
     void OnOK() override {
         Napi::HandleScope scope(Env());
-        if (auto* ch = std::get_if<epotoken::bg_challenge>(&result_)) {
+        if (auto* att = std::get_if<epotoken::attestation_result>(&result_)) {
             auto obj = Napi::Object::New(Env());
-            obj.Set("interpreterUrl", Napi::String::New(Env(), ch->interpreter_url));
-            obj.Set("program",        Napi::String::New(Env(), ch->program));
-            obj.Set("globalName",     Napi::String::New(Env(), ch->global_name));
+            obj.Set("interpreterUrl", Napi::String::New(Env(), att->challenge.interpreter_url));
+            obj.Set("program",        Napi::String::New(Env(), att->challenge.program));
+            obj.Set("globalName",     Napi::String::New(Env(), att->challenge.global_name));
+            obj.Set("visitorData",    Napi::String::New(Env(), att->visitor_data));
             deferred_.Resolve(obj);
         } else {
             const auto& err = std::get<epotoken::challenge_error>(result_);
@@ -56,23 +54,14 @@ public:
     }
 
 private:
-    Napi::Promise::Deferred      deferred_;
-    std::string                  visitor_data_;
-    epotoken::challenge_outcome  result_;
+    Napi::Promise::Deferred        deferred_;
+    epotoken::attestation_outcome  result_;
 };
 
 Napi::Value GetAttestationChallenge(const Napi::CallbackInfo& info) {
     Napi::Env env = info.Env();
     auto deferred = Napi::Promise::Deferred::New(env);
-
-    if (info.Length() < 1 || !info[0].IsString()) {
-        deferred.Reject(
-            Napi::TypeError::New(env, "visitorData must be a string").Value());
-        return deferred.Promise();
-    }
-
-    std::string vd = info[0].As<Napi::String>().Utf8Value();
-    auto* worker = new GetChallengeWorker(env, deferred, std::move(vd));
+    auto* worker = new GetChallengeWorker(env, deferred);
     worker->Queue();
     return deferred.Promise();
 }

@@ -7,38 +7,41 @@
 
 // ---------------------------------------------------------------------------
 // generate_po_token
-// Full BotGuard flow: Innertube /att/get → interpreter → snapshot → GenerateIT → mint.
+// Creates a fresh Innertube WEB session, fetches the BotGuard challenge via
+// /att/get, runs BotGuard in V8, and mints the PoToken.
 // Falls back to the legacy jnn-pa Create endpoint if /att/get fails.
 // ---------------------------------------------------------------------------
 
-epotoken::po_token_outcome generate_po_token(
-        const std::string& visitor_data,
-        const std::string& content_binding_in) {
+epotoken::po_token_outcome generate_po_token(const std::string& content_binding_in) {
     using namespace epotoken;
     using namespace epotoken::constants;
 
-    const std::string content_binding =
-        content_binding_in.empty() ? visitor_data : content_binding_in;
+    // -----------------------------------------------------------------------
+    // 1. Create fresh session + fetch BotGuard challenge via Innertube /att/get.
+    //    Returns both the challenge and the session's visitor_data.
+    // -----------------------------------------------------------------------
+    std::string visitor_data;
+    challenge_outcome challenge_res;
 
-    if (content_binding.empty() && visitor_data.empty()) {
-        return error{
-            "No identifier: both visitor_data and content_binding are empty.",
-            "CRITICAL"
-        };
+    auto att_res = get_attestation_challenge();
+    if (auto* att = std::get_if<attestation_result>(&att_res)) {
+        visitor_data = att->visitor_data;
+        challenge_res = att->challenge;
+    } else {
+        // /att/get failed — fall back to legacy jnn-pa Create RPC.
+        // Generate a local visitor_data so the result is still populated.
+        visitor_data = generate_visitor_data();
+        challenge_res = fetch_challenge();
     }
 
-    // -----------------------------------------------------------------------
-    // 1. Fetch BotGuard challenge via Innertube /att/get (primary)
-    //    Falls back to the legacy jnn-pa Create endpoint on failure.
-    // -----------------------------------------------------------------------
-    challenge_outcome challenge_res = get_attestation_challenge(visitor_data);
-    if (std::get_if<challenge_error>(&challenge_res)) {
-        challenge_res = fetch_challenge(visitor_data);
-    }
     if (auto* err = std::get_if<challenge_error>(&challenge_res)) {
         return error{err->message, "CRITICAL"};
     }
     const auto& challenge = std::get<bg_challenge>(challenge_res);
+
+    // content_binding defaults to visitor_data when not specified
+    const std::string content_binding =
+        content_binding_in.empty() ? visitor_data : content_binding_in;
 
     // -----------------------------------------------------------------------
     // 2. Fetch BotGuard interpreter JavaScript
@@ -83,7 +86,7 @@ epotoken::po_token_outcome generate_po_token(
     } guard{runner};
 
     // -----------------------------------------------------------------------
-    // 4. Run BotGuard snapshot (async via event loop)
+    // 4. Run BotGuard snapshot
     // -----------------------------------------------------------------------
     auto snap_res = v8_runner::run_snapshot(runner);
     if (auto* err = std::get_if<v8_runner::run_error>(&snap_res)) {
@@ -112,7 +115,7 @@ epotoken::po_token_outcome generate_po_token(
         std::get<v8_runner::po_token_result>(mint_res).po_token;
 
     // -----------------------------------------------------------------------
-    // 7. Generate placeholder token (may silently fail for very long bindings)
+    // 7. Generate placeholder token
     // -----------------------------------------------------------------------
     std::string placeholder;
     auto ph_res = generate_placeholder_token(content_binding);

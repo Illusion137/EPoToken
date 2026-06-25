@@ -132,7 +132,6 @@ std::string decode_visitor_data_id(const std::string& visitor_data) {
 }
 
 // Returns an 11-char random string from the base64url alphabet.
-// Used as the local visitor ID when no visitor_data is available.
 std::string random_visitor_id() {
     static constexpr char ALPHA[] =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -448,31 +447,46 @@ http::request_options innertube_post_opts(
 // ===========================================================================
 
 // ---------------------------------------------------------------------------
-// get_attestation_challenge — Innertube /att/get  (primary)
-// Mirrors innertube.getAttestationChallenge('ENGAGEMENT_TYPE_UNBOUND').
+// generate_visitor_data — creates a fresh protobuf-encoded visitor_data string.
+// Callers can use this as a fallback when /att/get fails and they still need
+// a valid visitor_data for the result.
 // ---------------------------------------------------------------------------
 
-challenge_outcome get_attestation_challenge(const std::string& visitor_data) {
-    // 1. Fetch /sw.js_data to get real session data (api_key, client_version, etc.)
-    session_data sd = fetch_session(visitor_data);
+std::string generate_visitor_data() {
+    const uint32_t ts = static_cast<uint32_t>(
+        std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+    return encode_visitor_data(random_visitor_id(), ts);
+}
 
-    // 2. Ensure we have visitor_data in the context
+// ---------------------------------------------------------------------------
+// get_attestation_challenge — creates a fresh Innertube WEB session then
+// calls /att/get. Mirrors innertube.getAttestationChallenge('ENGAGEMENT_TYPE_UNBOUND').
+// Returns both the challenge and the session visitor_data.
+// ---------------------------------------------------------------------------
+
+attestation_outcome get_attestation_challenge() {
+    // 1. Create a fresh session: fetches /sw.js_data for real api_key,
+    //    client_version, device_info, and visitor_data.
+    session_data sd = fetch_session("");
+
+    // Ensure visitor_data is set (absolute fallback using STATIC_VISITOR_ID).
     if (sd.visitor_data.empty()) {
-        // Absolute fallback: generate locally with STATIC_VISITOR_ID
         const uint32_t ts = static_cast<uint32_t>(
             std::chrono::duration_cast<std::chrono::seconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count());
         sd.visitor_data = encode_visitor_data(constants::STATIC_VISITOR_ID, ts);
+        sd.visitor_id   = constants::STATIC_VISITOR_ID;
     }
 
-    // 3. Build the Innertube WEB request body
+    // 2. Build the Innertube WEB request body
     const json body_json = {
         {"context",        build_context(sd)},
         {"engagementType", "ENGAGEMENT_TYPE_UNBOUND"}
     };
     const std::string body_str = body_json.dump();
 
-    // 4. POST /youtubei/v1/att/get?prettyPrint=false&alt=json
+    // 3. POST /youtubei/v1/att/get?prettyPrint=false&alt=json
     const std::string url =
         std::string(constants::INNERTUBE_BASE_URL) + "/att/get?prettyPrint=false&alt=json";
 
@@ -490,19 +504,22 @@ challenge_outcome get_attestation_challenge(const std::string& visitor_data) {
         };
     }
 
-    return parse_att_response(resp.body);
+    auto ch = parse_att_response(resp.body);
+    if (auto* c = std::get_if<bg_challenge>(&ch)) {
+        return attestation_result{*c, sd.visitor_data};
+    }
+    return std::get<challenge_error>(ch);
 }
 
 // ---------------------------------------------------------------------------
 // fetch_challenge — legacy jnn-pa Create RPC  (fallback)
 // ---------------------------------------------------------------------------
 
-challenge_outcome fetch_challenge(const std::string& visitor_data) {
+challenge_outcome fetch_challenge() {
     using namespace constants;
 
     json payload = json::array();
     payload.push_back(REQUEST_KEY);
-    if (!visitor_data.empty()) payload.push_back(visitor_data);
 
     http::request_options opts;
     opts.method = "POST";

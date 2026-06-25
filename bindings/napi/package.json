@@ -1,0 +1,23 @@
+{
+  "name": "epotoken-napi",
+  "version": "0.1.0",
+  "description": "Node.js N-API addon for EPoToken — C++ Innertube challenge + GenerateIT HTTP, placeholder token generation",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build:native": "node-gyp configure build",
+    "build:ts": "tsc",
+    "build": "npm run build:native && npm run build:ts",
+    "rebuild": "node-gyp rebuild && npm run build:ts"
+  },
+  "dependencies": {
+    "bgutils-js": "^2.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "node-addon-api": "^8.0.0",
+    "node-gyp": "^10.0.0",
+    "typescript": "^5.0.0"
+  },
+  "gypfile": true
+}

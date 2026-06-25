@@ -6,13 +6,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # ---------------------------------------------------------------------------
-# Dependencies
+# nlohmann/json (header-only; fetched if not found by pkg-config)
 # ---------------------------------------------------------------------------
 
-# libcurl
-find_package(CURL REQUIRED)
-
-# nlohmann/json (header-only; fetched if not found)
 find_package(nlohmann_json QUIET)
 if(NOT nlohmann_json_FOUND)
     include(FetchContent)
@@ -23,21 +19,60 @@ if(NOT nlohmann_json_FOUND)
         SOURCE_DIR ${CMAKE_BINARY_DIR}/_json
     )
     FetchContent_MakeAvailable(nlohmann_json)
-    # Create an interface target pointing at the downloaded header
     add_library(nlohmann_json INTERFACE)
     target_include_directories(nlohmann_json INTERFACE ${CMAKE_BINARY_DIR}/_json)
     add_library(nlohmann_json::nlohmann_json ALIAS nlohmann_json)
 endif()
 
-# V8 — searched via pkg-config first, then manual hints.
-# Set V8_INCLUDE_DIR and V8_LIBRARIES on the cmake command line to override.
+# ---------------------------------------------------------------------------
+# WASM target (Emscripten toolchain only)
+# Exports pure-compute functions; JS host handles HTTP + BotGuard.
+# ---------------------------------------------------------------------------
+
+if(EMSCRIPTEN)
+    add_executable(epotoken_wasm
+        bindings/wasm/epotoken_wasm.cpp
+        src/base64.cpp
+        src/challenge.cpp
+        src/placeholder.cpp
+    )
+
+    target_include_directories(epotoken_wasm PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+
+    target_link_libraries(epotoken_wasm PRIVATE nlohmann_json::nlohmann_json)
+
+    set_target_properties(epotoken_wasm PROPERTIES
+        SUFFIX ".js"
+    )
+
+    target_link_options(epotoken_wasm PRIVATE
+        "SHELL:--bind"
+        "SHELL:-s MODULARIZE=1"
+        "SHELL:-s EXPORT_NAME='EPoToken'"
+        "SHELL:-s ENVIRONMENT=web,node"
+        "SHELL:-s SINGLE_FILE=0"
+        "SHELL:-s ALLOW_MEMORY_GROWTH=1"
+    )
+
+    # Nothing below this point is relevant for WASM builds.
+    return()
+endif()
+
+# ---------------------------------------------------------------------------
+# Native dependencies (not used in WASM builds)
+# ---------------------------------------------------------------------------
+
+find_package(CURL REQUIRED)
+
 find_package(PkgConfig QUIET)
 if(PkgConfig_FOUND)
     pkg_check_modules(V8 QUIET v8)
 endif()
 
 if(NOT V8_FOUND)
-    # Common install paths (node, v8-dev packages, custom builds)
     find_path(V8_INCLUDE_DIR
         NAMES v8.h
         PATHS
@@ -89,13 +124,15 @@ message(STATUS "V8 include: ${V8_INCLUDE_DIRS}")
 message(STATUS "V8 libs:    ${V8_LIBRARIES}")
 
 # ---------------------------------------------------------------------------
-# Library target
+# Library target (native: full flow with V8 + libcurl)
 # ---------------------------------------------------------------------------
 
 add_library(epotoken STATIC
     src/base64.cpp
     src/http_client.cpp
     src/challenge.cpp
+    src/innertube_client.cpp
+    src/placeholder.cpp
     src/v8_runner.cpp
     src/epotoken.cpp
 )
@@ -116,7 +153,6 @@ target_link_libraries(epotoken
         ${V8_LIBRARIES}
 )
 
-# V8 requires these definitions when linking statically.
 target_compile_definitions(epotoken PRIVATE
     V8_COMPRESS_POINTERS
     V8_31BIT_SMIS_ON_64BIT_ARCH
@@ -144,3 +180,8 @@ install(TARGETS epotoken
     LIBRARY DESTINATION lib
 )
 install(FILES include/epotoken.h DESTINATION include/epotoken)
+
+# ---------------------------------------------------------------------------
+# NAPI note: use node-gyp + bindings/napi/binding.gyp
+#   cd bindings/napi && npm install && npm run build
+# ---------------------------------------------------------------------------

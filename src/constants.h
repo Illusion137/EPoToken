@@ -2,10 +2,16 @@
 
 namespace epotoken::constants {
 
+// jnn-pa (bgutils-js) keys — used for BotGuard Create / GenerateIT RPC.
 inline constexpr const char* GOOG_API_KEY  = "AIzaSyDyT5W0Jh49F30Pqqtyfdf7pDLFKLJoAnw";
 inline constexpr const char* GOOG_BASE_URL = "https://jnn-pa.googleapis.com";
-inline constexpr const char* YT_BASE_URL   = "https://www.youtube.com";
 inline constexpr const char* REQUEST_KEY   = "O43z0dpjhgX20SCx4KAo";
+
+// Innertube (YouTubei.js) — used for /att/get attestation endpoint.
+inline constexpr const char* INNERTUBE_API_KEY =
+    "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8";
+inline constexpr const char* INNERTUBE_CLIENT_VERSION = "2.20241107.01.00";
+inline constexpr const char* YT_BASE_URL = "https://www.youtube.com";
 
 // Matches the user-agent used by bgutils-js / the JSDOM setup in potoken.node.ts.
 inline constexpr const char* USER_AGENT =

@@ -1,8 +1,6 @@
 #include "challenge.h"
 
 #include "base64.h"
-#include "constants.h"
-#include "http_client.h"
 
 #include <nlohmann/json.hpp>
 
@@ -13,7 +11,6 @@ using json = nlohmann::json;
 namespace {
 
 // Mirrors bgutils descramble()/B(): base64url-decode then add 97 (mod 256) per byte.
-// The encoding scheme subtracts 97 from each char before base64-encoding.
 std::string descramble(const std::string& encoded) {
     std::vector<uint8_t> bytes = base64::decode(encoded);
     for (auto& b : bytes) {
@@ -45,9 +42,8 @@ challenge_outcome parse_inner(const json& outer) {
     }
 
     // Layout: [messageId, safeScriptArr, trustedUrlArr, interpreterHash, program, globalName, ?, blob]
-    // e = inner_arr[1], r = inner_arr[2], program = inner_arr[4], globalName = inner_arr[5]
-    const auto& e_val = inner_arr[1]; // array containing safe script URL strings
-    const auto& r_val = inner_arr[2]; // array containing trusted resource URL strings
+    const auto& e_val = inner_arr[1]; // safe script URL strings
+    const auto& r_val = inner_arr[2]; // trusted resource URL strings
 
     std::string interpreter_url;
     if (r_val.is_array()) {
@@ -58,25 +54,20 @@ challenge_outcome parse_inner(const json& outer) {
             }
         }
     }
-
-    if (interpreter_url.empty()) {
-        // Fallback: try the safe script array
-        if (e_val.is_array()) {
-            for (const auto& item : e_val) {
-                if (item.is_string() && !item.get<std::string>().empty()) {
-                    interpreter_url = item.get<std::string>();
-                    break;
-                }
+    if (interpreter_url.empty() && e_val.is_array()) {
+        for (const auto& item : e_val) {
+            if (item.is_string() && !item.get<std::string>().empty()) {
+                interpreter_url = item.get<std::string>();
+                break;
             }
         }
     }
-
     if (interpreter_url.empty()) {
         return challenge_error{"Could not extract interpreter URL from challenge"};
     }
 
-    // Protocol-relative URL → prepend https:
-    if (interpreter_url.size() >= 2 && interpreter_url[0] == '/' && interpreter_url[1] == '/') {
+    if (interpreter_url.size() >= 2 &&
+        interpreter_url[0] == '/' && interpreter_url[1] == '/') {
         interpreter_url = "https:" + interpreter_url;
     }
 
@@ -98,51 +89,57 @@ challenge_outcome parse_inner(const json& outer) {
 
 challenge_outcome parse_challenge_response(const std::string& json_body) {
     json outer;
-    try {
-        outer = json::parse(json_body);
-    } catch (...) {
+    try { outer = json::parse(json_body); }
+    catch (...) {
         return challenge_error{"Failed to parse challenge HTTP response as JSON"};
     }
-
     if (!outer.is_array() || outer.empty()) {
         return challenge_error{"Challenge response is not a JSON array"};
     }
-
     return parse_inner(outer);
 }
 
-challenge_outcome fetch_challenge(const std::string& visitor_data) {
-    using namespace constants;
-
-    json payload = json::array();
-    payload.push_back(REQUEST_KEY);
-    if (!visitor_data.empty()) {
-        payload.push_back(visitor_data);
+challenge_outcome parse_att_response(const std::string& json_body) {
+    json resp;
+    try { resp = json::parse(json_body); }
+    catch (...) {
+        return challenge_error{"Failed to parse /att/get response as JSON"};
     }
 
-    http::request_options opts;
-    opts.method = "POST";
-    opts.body   = payload.dump();
-    opts.headers = {
-        {"content-type",  "application/json+protobuf"},
-        {"x-goog-api-key", GOOG_API_KEY},
-        {"x-user-agent",  "grpc-web-javascript/0.1"},
-        {"user-agent",    USER_AGENT},
-    };
-
-    auto result = http::request(CREATE_ENDPOINT, opts);
-    if (auto* err = std::get_if<http::http_error>(&result)) {
-        return challenge_error{"HTTP error fetching challenge: " + err->message};
+    if (!resp.is_object()) {
+        return challenge_error{"/att/get response is not a JSON object"};
     }
 
-    const auto& resp = std::get<http::response>(result);
-    if (!resp.ok()) {
+    auto it = resp.find("bg_challenge");
+    if (it == resp.end() || !it->is_object()) {
         return challenge_error{
-            "Challenge fetch returned HTTP " + std::to_string(resp.status)
+            "No bg_challenge in /att/get response: " + json_body.substr(0, 120)
         };
     }
 
-    return parse_challenge_response(resp.body);
+    const json& bgc = *it;
+
+    auto get_str = [&](const char* key) -> std::string {
+        auto f = bgc.find(key);
+        return (f != bgc.end() && f->is_string()) ? f->get<std::string>() : "";
+    };
+
+    std::string interpreter_url = get_str("interpreter_url");
+    if (interpreter_url.empty()) {
+        return challenge_error{"bg_challenge.interpreter_url is missing or empty"};
+    }
+    if (interpreter_url.size() >= 2 &&
+        interpreter_url[0] == '/' && interpreter_url[1] == '/') {
+        interpreter_url = "https:" + interpreter_url;
+    }
+
+    const std::string program     = get_str("program");
+    const std::string global_name = get_str("global_name");
+    if (program.empty() || global_name.empty()) {
+        return challenge_error{"bg_challenge missing program or global_name"};
+    }
+
+    return bg_challenge{interpreter_url, program, global_name};
 }
 
 } // namespace epotoken

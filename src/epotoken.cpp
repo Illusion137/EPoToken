@@ -44,31 +44,34 @@ epotoken::po_token_outcome generate_po_token(const std::string& content_binding_
         content_binding_in.empty() ? visitor_data : content_binding_in;
 
     // -----------------------------------------------------------------------
-    // 2. Fetch BotGuard interpreter JavaScript
+    // 2. Get BotGuard interpreter JavaScript.
+    //    Modern jnn-pa responses embed the JS directly; /att/get provides a URL.
     // -----------------------------------------------------------------------
-    http::request_options fetch_opts;
-    fetch_opts.method = "GET";
-    fetch_opts.headers = {
-        {"user-agent", USER_AGENT},
-        {"referer",    "https://www.youtube.com/"},
-    };
+    std::string interpreter_js;
 
-    fprintf(stderr, "DEBUG: interpreter_url='%s'\n", challenge.interpreter_url.c_str());
-    fprintf(stderr, "DEBUG: program_len=%zu  global_name='%s'\n",
-            challenge.program.size(), challenge.global_name.c_str());
-
-    auto interp_res = http::request(challenge.interpreter_url, fetch_opts);
-    if (auto* err = std::get_if<http::http_error>(&interp_res)) {
-        return error{"Failed to fetch interpreter JS: " + err->message, "CRITICAL"};
-    }
-    const auto& interp_resp = std::get<http::response>(interp_res);
-    if (!interp_resp.ok()) {
-        return error{
-            "Interpreter JS fetch returned HTTP " +
-            std::to_string(interp_resp.status), "CRITICAL"
+    if (!challenge.interpreter_js.empty()) {
+        interpreter_js = challenge.interpreter_js;
+    } else {
+        http::request_options fetch_opts;
+        fetch_opts.method = "GET";
+        fetch_opts.headers = {
+            {"user-agent", USER_AGENT},
+            {"referer",    "https://www.youtube.com/"},
         };
+        auto interp_res = http::request(challenge.interpreter_url, fetch_opts);
+        if (auto* err = std::get_if<http::http_error>(&interp_res)) {
+            return error{"Failed to fetch interpreter JS: " + err->message, "CRITICAL"};
+        }
+        const auto& interp_resp = std::get<http::response>(interp_res);
+        if (!interp_resp.ok()) {
+            return error{
+                "Interpreter JS fetch returned HTTP " +
+                std::to_string(interp_resp.status), "CRITICAL"
+            };
+        }
+        interpreter_js = interp_resp.body;
     }
-    const std::string interpreter_js = interp_resp.body;
+
     if (interpreter_js.empty()) {
         return error{"Interpreter JS is empty", "CRITICAL"};
     }

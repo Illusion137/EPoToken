@@ -6,7 +6,8 @@
 namespace epotoken {
 
 struct bg_challenge {
-    std::string interpreter_url;  // https:-prefixed
+    std::string interpreter_url;  // https:-prefixed URL to fetch; empty when interpreter_js is set
+    std::string interpreter_js;   // JS embedded in challenge response; empty when url is set
     std::string program;
     std::string global_name;
 };

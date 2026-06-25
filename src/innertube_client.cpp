@@ -459,15 +459,11 @@ attestation_outcome get_attestation_challenge() {
         };
     }
 
-    fprintf(stderr, "DEBUG /att/get body (first 500): %.500s\n", resp.body.c_str());
-
     auto ch = parse_att_response(resp.body);
     if (auto* c = std::get_if<bg_challenge>(&ch)) {
         return attestation_result{*c, sd.visitor_data};
     }
-    const auto& ce = std::get<challenge_error>(ch);
-    fprintf(stderr, "DEBUG parse_att_response error: %s\n", ce.message.c_str());
-    return ce;
+    return std::get<challenge_error>(ch);
 }
 
 // ---------------------------------------------------------------------------
@@ -500,7 +496,6 @@ challenge_outcome fetch_challenge() {
             "Challenge fetch returned HTTP " + std::to_string(resp.status)
         };
     }
-    fprintf(stderr, "DEBUG jnn-pa Create body (first 500): %.500s\n", resp.body.c_str());
     return parse_challenge_response(resp.body);
 }
 

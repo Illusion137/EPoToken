@@ -53,6 +53,10 @@ epotoken::po_token_outcome generate_po_token(const std::string& content_binding_
         {"referer",    "https://www.youtube.com/"},
     };
 
+    fprintf(stderr, "DEBUG: interpreter_url='%s'\n", challenge.interpreter_url.c_str());
+    fprintf(stderr, "DEBUG: program_len=%zu  global_name='%s'\n",
+            challenge.program.size(), challenge.global_name.c_str());
+
     auto interp_res = http::request(challenge.interpreter_url, fetch_opts);
     if (auto* err = std::get_if<http::http_error>(&interp_res)) {
         return error{"Failed to fetch interpreter JS: " + err->message, "CRITICAL"};

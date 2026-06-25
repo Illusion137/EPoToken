@@ -11,14 +11,16 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(nlohmann_json QUIET)
 if(NOT nlohmann_json_FOUND)
-    include(FetchContent)
-    FetchContent_Declare(
-        nlohmann_json
-        URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp
-        DOWNLOAD_NO_EXTRACT TRUE
-        SOURCE_DIR ${CMAKE_BINARY_DIR}/_json
-    )
-    FetchContent_MakeAvailable(nlohmann_json)
+    # Download json.hpp into <build>/_json/nlohmann/ so the include path
+    # <nlohmann/json.hpp> resolves with <build>/_json as the include root.
+    set(_json_inc ${CMAKE_BINARY_DIR}/_json/nlohmann/json.hpp)
+    if(NOT EXISTS ${_json_inc})
+        file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/_json/nlohmann)
+        file(DOWNLOAD
+            https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp
+            ${_json_inc}
+        )
+    endif()
     add_library(nlohmann_json INTERFACE)
     target_include_directories(nlohmann_json INTERFACE ${CMAKE_BINARY_DIR}/_json)
     add_library(nlohmann_json::nlohmann_json ALIAS nlohmann_json)

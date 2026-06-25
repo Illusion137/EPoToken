@@ -16,6 +16,14 @@
 #include <libplatform/libplatform.h>
 #include <v8.h>
 
+// Suppress warn_unused_result from v8::Maybe return values on Set/Resolve/Reject.
+// Every call site is fire-and-forget inside a sandboxed JS environment.
+#if defined(__clang__)
+#  pragma clang diagnostic ignored "-Wunused-result"
+#elif defined(__GNUC__)
+#  pragma GCC diagnostic ignored "-Wunused-result"
+#endif
+
 namespace epotoken::v8_runner {
 
 // ---------------------------------------------------------------------------
@@ -82,7 +90,7 @@ static v8::MaybeLocal<v8::Value> run_script(runner* r, const std::string& src,
     auto ctx = r->context.Get(iso);
     v8::Context::Scope ctx_scope(ctx);
     v8::TryCatch try_catch(iso);
-    v8::ScriptOrigin origin(iso, v8str(iso, name));
+    v8::ScriptOrigin origin(v8str(iso, name));
     auto script = v8::Script::Compile(ctx, v8str(iso, src), &origin);
     if (script.IsEmpty()) return {};
     return script.ToLocalChecked()->Run(ctx);
@@ -98,8 +106,9 @@ static v8::MaybeLocal<v8::Value> eval(runner* r, const std::string& src) {
 // ---------------------------------------------------------------------------
 
 static runner* runner_from_data(const v8::FunctionCallbackInfo<v8::Value>& args) {
-    return static_cast<runner*>(
-        v8::Local<v8::External>::Cast(args.Data())->Value());
+    // runner pointer was packed into a BigInt to avoid v8::External's sandbox tag requirement.
+    uint64_t ptr_val = args.Data().As<v8::BigInt>()->Uint64Value();
+    return reinterpret_cast<runner*>(static_cast<uintptr_t>(ptr_val));
 }
 
 static void js_set_timeout(const v8::FunctionCallbackInfo<v8::Value>& args) {
@@ -263,19 +272,19 @@ static void js_fetch(const v8::FunctionCallbackInfo<v8::Value>& args) {
     resp_obj->Set(ctx, v8str(iso, "status"),
         v8::Integer::New(iso, static_cast<int32_t>(status)));
 
+    // Body is stored as a V8 String in the Data slot — avoids v8::External sandbox tags.
+    auto body_v8 = v8str(iso, body_copy);
+
     // .text() → Promise.resolve(body)
     auto text_fn = v8::Function::New(ctx,
         [](const v8::FunctionCallbackInfo<v8::Value>& fn_args) {
             auto fn_iso = fn_args.GetIsolate();
             auto fn_ctx = fn_iso->GetCurrentContext();
-            auto body_ext = fn_args.Data().As<v8::External>();
-            const std::string* body_ptr = static_cast<const std::string*>(body_ext->Value());
             auto resolver = v8::Promise::Resolver::New(fn_ctx).ToLocalChecked();
-            resolver->Resolve(fn_ctx, v8str(fn_iso, *body_ptr));
+            resolver->Resolve(fn_ctx, fn_args.Data());
             fn_args.GetReturnValue().Set(resolver->GetPromise());
         },
-        v8::External::New(iso, const_cast<void*>(
-            static_cast<const void*>(new std::string(body_copy))))
+        body_v8
     ).ToLocalChecked();
 
     // .json() → Promise.resolve(JSON.parse(body))
@@ -283,10 +292,8 @@ static void js_fetch(const v8::FunctionCallbackInfo<v8::Value>& args) {
         [](const v8::FunctionCallbackInfo<v8::Value>& fn_args) {
             auto fn_iso = fn_args.GetIsolate();
             auto fn_ctx = fn_iso->GetCurrentContext();
-            auto body_ext = fn_args.Data().As<v8::External>();
-            const std::string* body_ptr = static_cast<const std::string*>(body_ext->Value());
             v8::TryCatch tc(fn_iso);
-            auto json_obj = v8::JSON::Parse(fn_ctx, v8str(fn_iso, *body_ptr));
+            auto json_obj = v8::JSON::Parse(fn_ctx, fn_args.Data().As<v8::String>());
             auto resolver = v8::Promise::Resolver::New(fn_ctx).ToLocalChecked();
             if (json_obj.IsEmpty()) {
                 resolver->Reject(fn_ctx, v8::Exception::SyntaxError(
@@ -296,8 +303,7 @@ static void js_fetch(const v8::FunctionCallbackInfo<v8::Value>& args) {
             }
             fn_args.GetReturnValue().Set(resolver->GetPromise());
         },
-        v8::External::New(iso, const_cast<void*>(
-            static_cast<const void*>(new std::string(body_copy))))
+        body_v8
     ).ToLocalChecked();
 
     // .arrayBuffer() → Promise.resolve(ArrayBuffer)
@@ -305,18 +311,16 @@ static void js_fetch(const v8::FunctionCallbackInfo<v8::Value>& args) {
         [](const v8::FunctionCallbackInfo<v8::Value>& fn_args) {
             auto fn_iso = fn_args.GetIsolate();
             auto fn_ctx = fn_iso->GetCurrentContext();
-            auto body_ext = fn_args.Data().As<v8::External>();
-            const std::string* body_ptr = static_cast<const std::string*>(body_ext->Value());
-            auto ab = v8::ArrayBuffer::New(fn_iso, body_ptr->size());
-            if (!body_ptr->empty()) {
-                memcpy(ab->GetBackingStore()->Data(), body_ptr->data(), body_ptr->size());
+            std::string body_str = to_std(fn_iso, fn_args.Data());
+            auto ab = v8::ArrayBuffer::New(fn_iso, body_str.size());
+            if (!body_str.empty()) {
+                memcpy(ab->GetBackingStore()->Data(), body_str.data(), body_str.size());
             }
             auto resolver = v8::Promise::Resolver::New(fn_ctx).ToLocalChecked();
             resolver->Resolve(fn_ctx, ab);
             fn_args.GetReturnValue().Set(resolver->GetPromise());
         },
-        v8::External::New(iso, const_cast<void*>(
-            static_cast<const void*>(new std::string(body_copy))))
+        body_v8
     ).ToLocalChecked();
 
     resp_obj->Set(ctx, v8str(iso, "text"),   text_fn);
@@ -380,12 +384,14 @@ static void setup_browser_env(runner* r) {
     v8::Context::Scope cs(ctx);
 
     auto global = ctx->Global();
-    auto ext = v8::External::New(iso, r);
+    // Pack the runner pointer into a BigInt — v8::External now requires a sandbox
+    // type tag we can't provide, so BigInt is the portable way to smuggle a pointer.
+    auto runner_data = v8::BigInt::NewFromUnsigned(iso, reinterpret_cast<uint64_t>(r));
 
     auto set_fn = [&](const char* name, v8::FunctionCallback cb,
                       v8::Local<v8::Value> data = v8::Local<v8::Value>{}) {
         auto fn = v8::Function::New(ctx, cb,
-            data.IsEmpty() ? ext.As<v8::Value>() : data).ToLocalChecked();
+            data.IsEmpty() ? runner_data.As<v8::Value>() : data).ToLocalChecked();
         global->Set(ctx, v8str(iso, name), fn);
     };
 

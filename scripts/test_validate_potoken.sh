@@ -3,9 +3,9 @@
 # test_validate_potoken.sh
 # ------------------------------------------------------------------
 # For each YouTube video ID:
-#   1. Calls epotoken_cli to generate a po_token and placeholder_po_token
-#      (visitor_data is the YouTube session identifier; video_id is used
-#       as the content_binding so the token is bound to that video).
+#   1. Calls epotoken_cli to generate a po_token and placeholder_po_token.
+#      The CLI creates its own Innertube session internally — no visitor_data
+#      needs to be supplied by the caller.
 #   2. POSTs the tokens as JSON to the validation server:
 #        POST ${BASE_URL}/validate_potoken/<video_id>
 #        Content-Type: application/json
@@ -18,9 +18,6 @@
 # The validation server must be running separately; this script only
 # drives the generation + submission + result reporting.
 #
-# Required environment:
-#   VISITOR_DATA   YouTube visitor data string for token generation
-#
 # Optional environment:
 #   CLI_BIN    Path to the epotoken_cli binary
 #              (default: ./build/epotoken_cli)
@@ -29,12 +26,12 @@
 #   TIMEOUT    curl max time in seconds  (default: 30)
 #
 # Usage:
-#   VISITOR_DATA="Cgt..." ./scripts/test_validate_potoken.sh [video_id ...]
+#   ./scripts/test_validate_potoken.sh [video_id ...]
 #
 # Examples:
-#   VISITOR_DATA="Cgt..." ./scripts/test_validate_potoken.sh dQw4w9WgXcQ
-#   VISITOR_DATA="Cgt..." ./scripts/test_validate_potoken.sh abc123 def456
-#   VISITOR_DATA="Cgt..." CLI_BIN=./build/Release/epotoken_cli \
+#   ./scripts/test_validate_potoken.sh dQw4w9WgXcQ
+#   ./scripts/test_validate_potoken.sh abc123 def456
+#   CLI_BIN=./build/Release/epotoken_cli \
 #       BASE_URL=http://127.0.0.1:3000 ./scripts/test_validate_potoken.sh abc123
 #
 # Exit code: 0 if every video ID passes, 1 otherwise.
@@ -62,11 +59,6 @@ else
 fi
 
 # --- prerequisite checks -------------------------------------------
-if [ -z "${VISITOR_DATA:-}" ]; then
-    echo "error: VISITOR_DATA env var is required" >&2
-    echo "  e.g. VISITOR_DATA=\"Cgt...\" $0 <video_id>" >&2
-    exit 2
-fi
 command -v curl >/dev/null 2>&1 || { echo "error: curl is required" >&2; exit 2; }
 if [ ! -x "${CLI_BIN}" ]; then
     echo "error: CLI binary not found or not executable: ${CLI_BIN}" >&2
@@ -92,7 +84,6 @@ fail=0
 err=0
 
 # Extract the value of a "key: value" line from epotoken_cli output.
-# Usage: parse_field "po_token" "$cli_output"
 parse_field() {
     local field="$1" output="$2"
     printf '%s' "${output}" \
@@ -105,8 +96,9 @@ validate_one() {
     local url="${BASE_URL}/validate_potoken/${video_id}"
 
     # --- 1. Generate tokens via the CLI --------------------------------
+    # video_id is passed as content_binding; session is created internally.
     local cli_output cli_rc
-    cli_output="$("${CLI_BIN}" "${VISITOR_DATA}" "${video_id}" 2>&1)"
+    cli_output="$("${CLI_BIN}" "${video_id}" 2>&1)"
     cli_rc=$?
 
     if [ "${cli_rc}" -ne 0 ]; then
@@ -129,7 +121,6 @@ validate_one() {
     fi
 
     # --- 2. Build JSON payload -----------------------------------------
-    # Tokens are URL-safe base64 ([A-Za-z0-9_-]) so no JSON escaping needed.
     local payload
     payload="$(printf '{"po_token":"%s","placeholder_po_token":"%s"}' \
         "${po_token}" "${placeholder_po_token}")"

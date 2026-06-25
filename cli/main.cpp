@@ -3,18 +3,9 @@
 #include <string>
 
 int main(int argc, char** argv) {
-    if (argc < 2) {
-        fprintf(stderr, "Usage: epotoken_cli <visitor_data> [content_binding]\n");
-        return 1;
-    }
+    const std::string content_binding = argc >= 2 ? argv[1] : "";
 
-    const std::string visitor_data    = argv[1];
-    const std::string content_binding = argc >= 3 ? argv[2] : "";
-
-    // ------------------------------------------------------------------
-    // Full PoToken
-    // ------------------------------------------------------------------
-    auto result = generate_po_token(visitor_data, content_binding);
+    auto result = generate_po_token(content_binding);
 
     if (auto* err = std::get_if<epotoken::error>(&result)) {
         fprintf(stderr, "ERROR [%s]: %s\n", err->code.c_str(), err->message.c_str());
@@ -27,10 +18,7 @@ int main(int argc, char** argv) {
     printf("visitor_data:         %s\n", ok.visitor_data.c_str());
     printf("identifier:           %s\n", ok.identifier.c_str());
 
-    // ------------------------------------------------------------------
-    // Stand-alone placeholder token
-    // ------------------------------------------------------------------
-    const std::string id = content_binding.empty() ? visitor_data : content_binding;
+    const std::string id = content_binding.empty() ? ok.visitor_data : content_binding;
     auto ph = generate_placeholder_token(id);
     if (auto* s = std::get_if<std::string>(&ph)) {
         printf("standalone_placeholder: %s\n", s->c_str());

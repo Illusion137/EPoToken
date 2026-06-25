@@ -16,7 +16,6 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
-#include <random>
 #include <string>
 #include <vector>
 
@@ -131,19 +130,6 @@ std::string decode_visitor_data_id(const std::string& visitor_data) {
     return "";
 }
 
-// Returns an 11-char random string from the base64url alphabet.
-std::string random_visitor_id() {
-    static constexpr char ALPHA[] =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    std::random_device rd;
-    std::mt19937 rng(rd());
-    std::uniform_int_distribution<int> dist(0, 63);
-    std::string s;
-    s.reserve(11);
-    for (int i = 0; i < 11; ++i) s += ALPHA[dist(rng)];
-    return s;
-}
-
 // ===========================================================================
 // Session data — all fields extracted from sw.js_data and used in context
 // ===========================================================================
@@ -190,6 +176,9 @@ struct session_data {
 // ---------------------------------------------------------------------------
 // Fetch and parse /sw.js_data to populate session_data.
 //
+// YouTube assigns visitor_data in the response at device_info[13].
+// We do NOT pre-generate any visitor ID — we read whatever YouTube gives us.
+//
 // JSPB response structure (YouTube.js Session.ts #getSessionData):
 //   data          = JSON.parse(text.replace /^\)\]\}'//)
 //   ytcfg         = data[0][2]
@@ -202,42 +191,13 @@ struct session_data {
 //     [79] time_zone, [86] browser_name, [87] browser_version,
 //     [103] device_experiment_id, [107] rollout_token
 // ---------------------------------------------------------------------------
-session_data fetch_session(const std::string& provided_visitor_data) {
+session_data fetch_session() {
     using namespace constants;
 
     session_data sd;
 
-    // ------------------------------------------------------------------
-    // Determine visitor_id (for VISITOR_INFO1_LIVE cookie) and
-    // visitor_data (for context.client.visitorData).
-    //
-    // If the caller supplied visitor_data: decode the protobuf to get the
-    // embedded id → use that as VISITOR_INFO1_LIVE.
-    // Otherwise: generate a fresh random id + encode as visitor_data.
-    // ------------------------------------------------------------------
-    if (!provided_visitor_data.empty()) {
-        sd.visitor_data = provided_visitor_data;
-        sd.visitor_id   = decode_visitor_data_id(provided_visitor_data);
-        if (sd.visitor_id.empty()) {
-            // Couldn't decode — fall back to a random id.
-            sd.visitor_id = random_visitor_id();
-        }
-    } else {
-        sd.visitor_id = random_visitor_id();
-        const uint32_t ts = static_cast<uint32_t>(
-            std::chrono::duration_cast<std::chrono::seconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count());
-        sd.visitor_data = encode_visitor_data(sd.visitor_id, ts);
-    }
-
-    // PREF=tz=America.New_York (YouTube.js: options.time_zone.replace('/', '.'))
-    std::string tz_pref = sd.time_zone;
-    std::replace(tz_pref.begin(), tz_pref.end(), '/', '.');
-
-    // ------------------------------------------------------------------
-    // GET /sw.js_data
-    // Headers mirror YouTube.js Session.ts #getSessionData()
-    // ------------------------------------------------------------------
+    // GET /sw.js_data — no VISITOR_INFO1_LIVE cookie on the initial request.
+    // YouTube will include a visitor_data for this session in device_info[13].
     http::request_options opts;
     opts.method     = "GET";
     opts.timeout_ms = 15000;
@@ -246,14 +206,11 @@ session_data fetch_session(const std::string& provided_visitor_data) {
         {"accept",         "*/*"},
         {"accept-language","en-US,en;q=0.9"},
         {"referer",        std::string(YT_BASE_URL) + "/sw.js"},
-        {"cookie",
-            "PREF=tz=" + tz_pref +
-            ";VISITOR_INFO1_LIVE=" + sd.visitor_id + ";"},
     };
 
     auto res = http::request(std::string(YT_BASE_URL) + "/sw.js_data", opts);
     const http::response* resp = std::get_if<http::response>(&res);
-    if (!resp || !resp->ok()) return sd;  // use defaults
+    if (!resp || !resp->ok()) return sd;  // leave visitor_data empty; caller handles fallback
 
     // ------------------------------------------------------------------
     // Strip JSPB safety prefix  )]}'\n  or  )]}'\r\n  or  )]}'
@@ -307,14 +264,10 @@ session_data fetch_session(const std::string& provided_visitor_data) {
         sd.device_make  = str_at(11);
         sd.device_model = str_at(12);
 
-        // visitor_data: only override if caller didn't provide one
-        if (provided_visitor_data.empty()) {
-            if (auto v = str_at(13); !v.empty()) {
-                sd.visitor_data = v;
-                // Re-derive visitor_id from the server-provided visitor_data
-                sd.visitor_id = decode_visitor_data_id(v);
-                if (sd.visitor_id.empty()) sd.visitor_id = sd.visitor_data.substr(0, 11);
-            }
+        // visitor_data: YouTube-assigned, decode to get the embedded id
+        if (auto v = str_at(13); !v.empty()) {
+            sd.visitor_data = v;
+            sd.visitor_id   = decode_visitor_data_id(v);
         }
 
         // Client version (WEB-specific)
@@ -453,10 +406,12 @@ http::request_options innertube_post_opts(
 // ---------------------------------------------------------------------------
 
 std::string generate_visitor_data() {
+    // Only used as a last-resort fallback when /sw.js_data is unreachable.
+    // STATIC_VISITOR_ID is the same constant YouTubei.js uses in this scenario.
     const uint32_t ts = static_cast<uint32_t>(
         std::chrono::duration_cast<std::chrono::seconds>(
             std::chrono::system_clock::now().time_since_epoch()).count());
-    return encode_visitor_data(random_visitor_id(), ts);
+    return encode_visitor_data(constants::STATIC_VISITOR_ID, ts);
 }
 
 // ---------------------------------------------------------------------------
@@ -467,8 +422,8 @@ std::string generate_visitor_data() {
 
 attestation_outcome get_attestation_challenge() {
     // 1. Create a fresh session: fetches /sw.js_data for real api_key,
-    //    client_version, device_info, and visitor_data.
-    session_data sd = fetch_session("");
+    //    client_version, device_info, and the YouTube-assigned visitor_data.
+    session_data sd = fetch_session();
 
     // Ensure visitor_data is set (absolute fallback using STATIC_VISITOR_ID).
     if (sd.visitor_data.empty()) {

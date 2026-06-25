@@ -1,0 +1,31 @@
+# CMake build directories
+build/
+build_*/
+cmake-build-*/
+
+# Node.js
+node_modules/
+package-lock.json
+
+# Compiled output
+*.o
+*.a
+*.so
+*.dylib
+*.node
+dist/
+
+# Emscripten output
+*.js.map
+epotoken.wasm
+epotoken.js
+
+# IDE / editors
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,6 +1,7 @@
 #include "v8_runner.h"
 
 #include "bgutils_bundle.h"
+#include "bg_full_bundle.h"
 #include "constants.h"
 #include "http_client.h"
 
@@ -400,6 +401,8 @@ static void setup_browser_env(runner* r) {
     set_fn("setInterval", js_set_interval);
     set_fn("clearTimeout",   js_clear_timer);
     set_fn("clearInterval",  js_clear_timer);
+    set_fn("setImmediate",   js_set_timeout);  // node compat: setTimeout(cb, 0)
+    set_fn("clearImmediate", js_clear_timer);
     set_fn("requestAnimationFrame",  js_request_animation_frame);
     set_fn("cancelAnimationFrame",   js_cancel_animation_frame);
     set_fn("queueMicrotask",         js_queue_microtask);
@@ -705,6 +708,8 @@ static void setup_browser_env(runner* r) {
     global->Set(ctx, v8str(iso, "window"), global);
     // self = also the global (used by some BotGuard versions)
     global->Set(ctx, v8str(iso, "self"), global);
+    // global = Node's name for the global object (JSDOM bundles expect it)
+    global->Set(ctx, v8str(iso, "global"), global);
     // globalThis already == global in V8 scripts
 
     // getComputedStyle stub
@@ -845,6 +850,12 @@ static void setup_browser_env(runner* r) {
     URL.prototype.toString = function() { return this.href; };
     URL.createObjectURL = function() { return ''; };
     URL.revokeObjectURL = function() {};
+    URL.parse = function(url, base) {
+        try { return new URL(url, base); } catch (e) { return null; }
+    };
+    URL.canParse = function(url, base) {
+        try { new URL(url, base); return true; } catch (e) { return false; }
+    };
 })();
 )JS";
         run_script(r, url_impl, "<URL>");
@@ -888,6 +899,287 @@ static void setup_browser_env(runner* r) {
 })();
 )JS";
         run_script(r, webgl_impl, "<WebGL>");
+    }
+
+    // ------------------------------------------------------------------
+    // Extra browser-API stubs that BotGuard fingerprints against.
+    // These do not have to behave correctly — they only need to exist
+    // and report reasonable values when probed, so the snapshot is
+    // accepted as coming from a real browser.
+    // ------------------------------------------------------------------
+    {
+        const char* extras_impl = R"JS(
+(function() {
+    // chrome object — present on Chrome UA pages
+    if (!globalThis.chrome) {
+        globalThis.chrome = {
+            runtime: {},
+            app:     { isInstalled: false },
+            csi:     function() { return {}; },
+            loadTimes: function() { return { firstPaintTime: 0 }; }
+        };
+    }
+
+    // Storage / localStorage / sessionStorage — simple in-memory implementations
+    function makeStorage() {
+        var data = {};
+        return {
+            get length() { return Object.keys(data).length; },
+            key: function(i) { return Object.keys(data)[i] || null; },
+            getItem: function(k) { return Object.prototype.hasOwnProperty.call(data, k) ? data[k] : null; },
+            setItem: function(k, v) { data[k] = String(v); },
+            removeItem: function(k) { delete data[k]; },
+            clear: function() { data = {}; }
+        };
+    }
+    if (!globalThis.localStorage)   globalThis.localStorage   = makeStorage();
+    if (!globalThis.sessionStorage) globalThis.sessionStorage = makeStorage();
+    if (!globalThis.Storage)        globalThis.Storage        = function Storage() {};
+
+    // IndexedDB stub — present, but never resolves a real DB
+    if (!globalThis.indexedDB) {
+        globalThis.indexedDB = {
+            open: function() {
+                var req = { onsuccess: null, onerror: null, onupgradeneeded: null, result: null, error: null };
+                setTimeout(function() {
+                    if (typeof req.onerror === 'function')
+                        req.onerror({ type: 'error', target: req });
+                }, 0);
+                return req;
+            },
+            deleteDatabase: function() { return { onsuccess: null, onerror: null }; },
+            databases:      function() { return Promise.resolve([]); }
+        };
+        globalThis.IDBDatabase    = function IDBDatabase() {};
+        globalThis.IDBTransaction = function IDBTransaction() {};
+        globalThis.IDBRequest     = function IDBRequest() {};
+        globalThis.IDBFactory     = function IDBFactory() {};
+        globalThis.IDBObjectStore = function IDBObjectStore() {};
+        globalThis.IDBIndex       = function IDBIndex() {};
+        globalThis.IDBKeyRange    = function IDBKeyRange() {};
+        globalThis.IDBCursor      = function IDBCursor() {};
+    }
+
+    // Worker / SharedWorker / BroadcastChannel — never actually spawn anything
+    if (!globalThis.Worker)            globalThis.Worker            = function Worker() { throw new Error('Worker not supported'); };
+    if (!globalThis.SharedWorker)      globalThis.SharedWorker      = function SharedWorker() { throw new Error('SharedWorker not supported'); };
+    if (!globalThis.BroadcastChannel)  globalThis.BroadcastChannel  = function BroadcastChannel() { this.postMessage = function() {}; this.close = function() {}; this.addEventListener = function() {}; this.removeEventListener = function() {}; };
+    if (!globalThis.MessageChannel)    globalThis.MessageChannel    = function MessageChannel() { this.port1 = {}; this.port2 = {}; };
+    if (!globalThis.MessagePort)       globalThis.MessagePort       = function MessagePort() {};
+
+    // Observers
+    var noopObserver = function() { this.observe = function() {}; this.unobserve = function() {}; this.disconnect = function() {}; this.takeRecords = function() { return []; }; };
+    if (!globalThis.MutationObserver)      globalThis.MutationObserver      = noopObserver;
+    if (!globalThis.IntersectionObserver)  globalThis.IntersectionObserver  = noopObserver;
+    if (!globalThis.ResizeObserver)        globalThis.ResizeObserver        = noopObserver;
+    if (!globalThis.PerformanceObserver)   globalThis.PerformanceObserver   = noopObserver;
+    if (!globalThis.ReportingObserver)     globalThis.ReportingObserver     = noopObserver;
+
+    // Notification (some BG variants probe permission)
+    if (!globalThis.Notification) {
+        globalThis.Notification = function Notification() {};
+        globalThis.Notification.permission = 'default';
+        globalThis.Notification.requestPermission = function() { return Promise.resolve('default'); };
+    }
+
+    // Fetch API extras — Headers / Request / Response (very minimal)
+    if (!globalThis.Headers) {
+        globalThis.Headers = function Headers(init) {
+            var map = {};
+            if (init && typeof init === 'object') {
+                for (var k in init) map[String(k).toLowerCase()] = String(init[k]);
+            }
+            this.append = function(k, v) { map[String(k).toLowerCase()] = String(v); };
+            this.delete = function(k) { delete map[String(k).toLowerCase()]; };
+            this.get = function(k) { var v = map[String(k).toLowerCase()]; return v === undefined ? null : v; };
+            this.has = function(k) { return Object.prototype.hasOwnProperty.call(map, String(k).toLowerCase()); };
+            this.set = function(k, v) { map[String(k).toLowerCase()] = String(v); };
+            this.forEach = function(cb) { for (var k in map) cb(map[k], k, this); };
+        };
+    }
+    if (!globalThis.Request)  globalThis.Request  = function Request() {};
+    if (!globalThis.Response) globalThis.Response = function Response() {};
+    if (!globalThis.Blob)     globalThis.Blob     = function Blob() { this.size = 0; this.type = ''; };
+    if (!globalThis.File)     globalThis.File     = function File()     {};
+    if (!globalThis.FormData) globalThis.FormData = function FormData() { this.append = function() {}; this.delete = function() {}; this.get = function() { return null; }; this.has = function() { return false; }; this.set = function() {}; };
+    if (!globalThis.AbortController) {
+        globalThis.AbortController = function AbortController() {
+            var self = this;
+            this.signal = { aborted: false, addEventListener: function() {}, removeEventListener: function() {}, dispatchEvent: function() { return true; } };
+            this.abort  = function() { self.signal.aborted = true; };
+        };
+    }
+    if (!globalThis.AbortSignal) globalThis.AbortSignal = function AbortSignal() {};
+
+    // EventTarget — many DOM classes inherit; provide a permissive base
+    if (!globalThis.EventTarget) {
+        globalThis.EventTarget = function EventTarget() {};
+        globalThis.EventTarget.prototype.addEventListener    = function() {};
+        globalThis.EventTarget.prototype.removeEventListener = function() {};
+        globalThis.EventTarget.prototype.dispatchEvent       = function() { return true; };
+    }
+
+    // crypto.subtle — present, never resolves real cryptographic results
+    if (globalThis.crypto && !globalThis.crypto.subtle) {
+        function rejector(name) {
+            return function() { return Promise.reject(new Error('subtle.' + name + ' not supported')); };
+        }
+        try {
+            Object.defineProperty(globalThis.crypto, 'subtle', {
+                value: {
+                    encrypt:    rejector('encrypt'),
+                    decrypt:    rejector('decrypt'),
+                    sign:       rejector('sign'),
+                    verify:     rejector('verify'),
+                    digest:     rejector('digest'),
+                    generateKey:rejector('generateKey'),
+                    deriveKey:  rejector('deriveKey'),
+                    deriveBits: rejector('deriveBits'),
+                    importKey:  rejector('importKey'),
+                    exportKey:  rejector('exportKey'),
+                    wrapKey:    rejector('wrapKey'),
+                    unwrapKey:  rejector('unwrapKey')
+                }
+            });
+        } catch (e) {}
+    }
+    if (!globalThis.SubtleCrypto) globalThis.SubtleCrypto = function SubtleCrypto() {};
+    if (!globalThis.CryptoKey)    globalThis.CryptoKey    = function CryptoKey()    {};
+
+    // History / window dimensions / devicePixelRatio
+    if (!globalThis.history) {
+        globalThis.history = {
+            length: 1, scrollRestoration: 'auto', state: null,
+            back: function() {}, forward: function() {}, go: function() {},
+            pushState: function() {}, replaceState: function() {}
+        };
+    }
+    if (typeof globalThis.devicePixelRatio !== 'number') globalThis.devicePixelRatio = 1;
+    if (typeof globalThis.innerWidth        !== 'number') globalThis.innerWidth        = 1280;
+    if (typeof globalThis.innerHeight       !== 'number') globalThis.innerHeight       = 720;
+    if (typeof globalThis.outerWidth        !== 'number') globalThis.outerWidth        = 1280;
+    if (typeof globalThis.outerHeight       !== 'number') globalThis.outerHeight       = 720;
+    if (typeof globalThis.scrollX           !== 'number') globalThis.scrollX           = 0;
+    if (typeof globalThis.scrollY           !== 'number') globalThis.scrollY           = 0;
+
+    // requestIdleCallback / cancelIdleCallback
+    if (!globalThis.requestIdleCallback)  globalThis.requestIdleCallback  = function(cb) { return setTimeout(function() { cb({ didTimeout: false, timeRemaining: function() { return 0; } }); }, 1); };
+    if (!globalThis.cancelIdleCallback)   globalThis.cancelIdleCallback   = function(id) { clearTimeout(id); };
+
+    // performance.timing / performance.getEntries
+    if (globalThis.performance) {
+        var t = Date.now();
+        if (!globalThis.performance.timing) {
+            globalThis.performance.timing = {
+                navigationStart: t, fetchStart: t, domainLookupStart: t, domainLookupEnd: t,
+                connectStart: t, connectEnd: t, secureConnectionStart: 0,
+                requestStart: t, responseStart: t, responseEnd: t,
+                domLoading: t, domInteractive: t, domContentLoadedEventStart: t, domContentLoadedEventEnd: t,
+                domComplete: t, loadEventStart: t, loadEventEnd: t,
+                unloadEventStart: 0, unloadEventEnd: 0, redirectStart: 0, redirectEnd: 0
+            };
+        }
+        if (!globalThis.performance.navigation) {
+            globalThis.performance.navigation = { type: 0, redirectCount: 0 };
+        }
+        if (typeof globalThis.performance.timeOrigin !== 'number') {
+            globalThis.performance.timeOrigin = t;
+        }
+        if (!globalThis.performance.getEntries)         globalThis.performance.getEntries         = function() { return []; };
+        if (!globalThis.performance.getEntriesByType)   globalThis.performance.getEntriesByType   = function() { return []; };
+        if (!globalThis.performance.getEntriesByName)   globalThis.performance.getEntriesByName   = function() { return []; };
+        if (!globalThis.performance.mark)               globalThis.performance.mark               = function() {};
+        if (!globalThis.performance.measure)            globalThis.performance.measure            = function() {};
+        if (!globalThis.performance.clearMarks)         globalThis.performance.clearMarks         = function() {};
+        if (!globalThis.performance.clearMeasures)      globalThis.performance.clearMeasures      = function() {};
+        if (!globalThis.performance.clearResourceTimings) globalThis.performance.clearResourceTimings = function() {};
+    }
+
+    // Intl — V8 has this; ensure DateTimeFormat reports a reasonable TZ
+    // (V8 picks ICU default; no-op here, just a presence check.)
+    if (!globalThis.Intl) globalThis.Intl = {};
+
+    // MediaDevices, MediaQueryList, AudioContext, RTCPeerConnection
+    if (globalThis.navigator) {
+        if (!globalThis.navigator.mediaDevices) {
+            globalThis.navigator.mediaDevices = {
+                enumerateDevices: function() { return Promise.resolve([]); },
+                getUserMedia:     function() { return Promise.reject(new Error('No media')); },
+                getDisplayMedia:  function() { return Promise.reject(new Error('No media')); }
+            };
+        }
+        if (!globalThis.navigator.connection) {
+            globalThis.navigator.connection = {
+                effectiveType: '4g', rtt: 50, downlink: 10, saveData: false, type: 'wifi',
+                addEventListener: function() {}, removeEventListener: function() {}
+            };
+        }
+        if (!globalThis.navigator.serviceWorker) {
+            globalThis.navigator.serviceWorker = {
+                ready:       Promise.resolve({ active: null, installing: null, waiting: null, update: function() {}, unregister: function() {} }),
+                controller:  null,
+                register:    function() { return Promise.reject(new Error('No SW')); },
+                getRegistration:  function() { return Promise.resolve(undefined); },
+                getRegistrations: function() { return Promise.resolve([]); },
+                addEventListener: function() {}, removeEventListener: function() {}
+            };
+        }
+        if (!globalThis.navigator.storage) {
+            globalThis.navigator.storage = {
+                estimate: function() { return Promise.resolve({ usage: 0, quota: 0 }); },
+                persist:  function() { return Promise.resolve(false); },
+                persisted:function() { return Promise.resolve(false); }
+            };
+        }
+        if (typeof globalThis.navigator.deviceMemory  !== 'number') globalThis.navigator.deviceMemory  = 8;
+        if (typeof globalThis.navigator.pdfViewerEnabled !== 'boolean') globalThis.navigator.pdfViewerEnabled = true;
+    }
+    if (!globalThis.AudioContext)        globalThis.AudioContext        = function AudioContext() {};
+    if (!globalThis.OfflineAudioContext) globalThis.OfflineAudioContext = function OfflineAudioContext() {};
+    if (!globalThis.RTCPeerConnection)   globalThis.RTCPeerConnection   = function RTCPeerConnection() {};
+    if (!globalThis.RTCSessionDescription) globalThis.RTCSessionDescription = function RTCSessionDescription() {};
+    if (!globalThis.RTCIceCandidate)     globalThis.RTCIceCandidate     = function RTCIceCandidate() {};
+
+    // CSS classes (some BG probes look for CSSStyleSheet.prototype.cssRules)
+    if (!globalThis.CSSStyleSheet)       globalThis.CSSStyleSheet       = function CSSStyleSheet() { this.cssRules = []; };
+    if (!globalThis.CSSStyleDeclaration) globalThis.CSSStyleDeclaration = function CSSStyleDeclaration() {};
+    if (!globalThis.CSS) {
+        globalThis.CSS = {
+            supports: function() { return false; },
+            escape:   function(s) { return String(s); }
+        };
+    }
+
+    // FontFace
+    if (!globalThis.FontFace) globalThis.FontFace = function FontFace() {};
+
+    // Document classes (for instanceof checks)
+    if (!globalThis.Document)      globalThis.Document      = function Document() {};
+    if (!globalThis.HTMLDocument)  globalThis.HTMLDocument  = function HTMLDocument() {};
+    if (!globalThis.Window)        globalThis.Window        = function Window() {};
+    if (!globalThis.Navigator)     globalThis.Navigator     = function Navigator() {};
+    if (!globalThis.Screen)        globalThis.Screen        = function Screen() {};
+    if (!globalThis.Location)      globalThis.Location      = function Location() {};
+
+    // PluginArray / MimeTypeArray classes
+    if (!globalThis.PluginArray)   globalThis.PluginArray   = function PluginArray() {};
+    if (!globalThis.MimeTypeArray) globalThis.MimeTypeArray = function MimeTypeArray() {};
+    if (!globalThis.Plugin)        globalThis.Plugin        = function Plugin() {};
+    if (!globalThis.MimeType)      globalThis.MimeType      = function MimeType() {};
+
+    // DOMException / DOMParser / XMLSerializer (rarely used but probed)
+    if (!globalThis.DOMException)   globalThis.DOMException   = function DOMException(msg, name) { this.message = msg || ''; this.name = name || 'Error'; };
+    if (!globalThis.DOMParser)      globalThis.DOMParser      = function DOMParser()      {};
+    if (!globalThis.XMLSerializer)  globalThis.XMLSerializer  = function XMLSerializer()  {};
+    if (!globalThis.XMLHttpRequest) globalThis.XMLHttpRequest = function XMLHttpRequest() {};
+    if (!globalThis.XPathEvaluator) globalThis.XPathEvaluator = function XPathEvaluator() {};
+
+    // SVG (sometimes referenced)
+    if (!globalThis.SVGElement)        globalThis.SVGElement        = function SVGElement()        {};
+    if (!globalThis.SVGSVGElement)     globalThis.SVGSVGElement     = function SVGSVGElement()     {};
+})();
+)JS";
+        run_script(r, extras_impl, "<browser-extras>");
     }
 }
 
@@ -1005,36 +1297,28 @@ std::variant<runner*, run_error> create_runner(
 
         v8::Context::Scope cs(ctx);
 
-        // 1. Browser globals
+        // 1. Browser globals — fetch, setTimeout, console, performance, crypto
+        //    (the JSDOM bundle in step 2 sets up window/document/navigator itself.)
         setup_browser_env(r);
 
-        // 2. bgutils bundle → sets globalThis.__bgutils__
+        // 2. Full BG bundle = bgutils-js + jsdom-minimal + entrypoint.
+        //    After eval, globalThis exposes runBotguard / newMinter / mint.
         if (init_error.empty()) {
             v8::TryCatch tc(r->isolate);
-            auto res = run_script(r, BGUTILS_BUNDLE_JS, "<bgutils-bundle>");
+            auto res = run_script(r, BG_FULL_BUNDLE_JS, "<bg-full-bundle>");
             if (res.IsEmpty()) {
                 init_error = tc.HasCaught()
-                    ? to_std(r->isolate, tc.Exception()) : "bgutils bundle eval failed";
+                    ? to_std(r->isolate, tc.Exception()) : "bg-full bundle eval failed";
             }
         }
 
-        // 3. BotGuard interpreter JS — mirrors new Function(js)()
-        if (init_error.empty()) {
-            const std::string wrapped =
-                "(function() {\n" + interpreter_js + "\n}).call(globalThis);";
-            v8::TryCatch tc(r->isolate);
-            auto res = run_script(r, wrapped, "<botguard-interpreter>");
-            if (res.IsEmpty()) {
-                init_error = tc.HasCaught()
-                    ? to_std(r->isolate, tc.Exception()) : "interpreter JS exec failed";
-            }
-        }
-
-        // 4. Expose program / globalName for the driver scripts
+        // 3. Stash interpreter_js / program / globalName as globals for the snapshot driver.
         if (init_error.empty()) {
             auto g = ctx->Global();
+            g->Set(ctx, v8str(r->isolate, "__epo_interp_src__"),  v8str(r->isolate, interpreter_js));
             g->Set(ctx, v8str(r->isolate, "__epo_program__"),     v8str(r->isolate, program));
             g->Set(ctx, v8str(r->isolate, "__epo_global_name__"), v8str(r->isolate, global_name));
+            g->Set(ctx, v8str(r->isolate, "__epo_user_agent__"),  v8str(r->isolate, constants::USER_AGENT));
         }
     } // iso_scope, hs released here
 
@@ -1053,26 +1337,19 @@ snapshot_outcome run_snapshot(runner* r) {
     auto ctx = r->context.Get(iso);
     v8::Context::Scope cs(ctx);
 
-    // Driver script: creates BotGuardClient, runs snapshot, stores results in __epo_state__
+    // Driver script: runs the bundle's runBotguard(interpreter, program, global_name, ua)
+    // which sets up JSDOM, evals the interpreter, and produces a snapshot. The bundle
+    // also stores `webPoSignalOutput` on globalThis for the later minter call.
     const char* driver = R"JS(
 (function() {
     globalThis.__epo_state__ = null;
-    var BotGuardClient = globalThis.__bgutils__.BG.BotGuardClient;
-    BotGuardClient.create({
-        program:    globalThis.__epo_program__,
-        globalName: globalThis.__epo_global_name__,
-        globalObj:  globalThis
-    }).then(function(botguard) {
-        var signal_output = [];
-        return botguard.snapshot({ webPoSignalOutput: signal_output })
-            .then(function(snapshot) {
-                globalThis.__epo_state__ = {
-                    snapshot: snapshot,
-                    signal_output: signal_output,
-                    done: true,
-                    error: null
-                };
-            });
+    globalThis.runBotguard(
+        globalThis.__epo_interp_src__,
+        globalThis.__epo_program__,
+        globalThis.__epo_global_name__,
+        globalThis.__epo_user_agent__
+    ).then(function(snapshot) {
+        globalThis.__epo_state__ = { snapshot: snapshot, done: true, error: null };
     }).catch(function(e) {
         globalThis.__epo_state__ = {
             done: true,
@@ -1125,24 +1402,17 @@ po_token_outcome run_mint(runner* r,
     const char* driver = R"JS(
 (function() {
     globalThis.__epo_mint_state__ = null;
-    var WebPoMinter = globalThis.__bgutils__.BG.WebPoMinter;
-    WebPoMinter.create(
-        { integrityToken: globalThis.__epo_integrity_token__ },
-        globalThis.__epo_state__.signal_output
-    ).then(function(minter) {
-        return minter.mintAsWebsafeString(globalThis.__epo_content_binding__);
-    }).then(function(po_token) {
-        globalThis.__epo_mint_state__ = {
-            po_token: po_token,
-            done: true,
-            error: null
-        };
-    }).catch(function(e) {
-        globalThis.__epo_mint_state__ = {
-            done: true,
-            error: e && e.message ? e.message : String(e)
-        };
-    });
+    globalThis.newMinter(globalThis.__epo_integrity_token__)
+        .then(function() { return globalThis.mint(globalThis.__epo_content_binding__); })
+        .then(function(po_token) {
+            globalThis.__epo_mint_state__ = { po_token: po_token, done: true, error: null };
+        })
+        .catch(function(e) {
+            globalThis.__epo_mint_state__ = {
+                done: true,
+                error: e && e.message ? e.message : String(e)
+            };
+        });
 })();
 )JS";
 

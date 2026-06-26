@@ -538,7 +538,10 @@ post_generate_it(const std::string& snapshot) {
         return challenge_error{"Failed to parse GenerateIT response as JSON"};
     }
     if (!gen_json.is_array() || gen_json.empty() || !gen_json[0].is_string()) {
-        return challenge_error{"Could not extract integrity token from GenerateIT response"};
+        return challenge_error{
+            "Could not extract integrity token from GenerateIT response (snapshot rejected): "
+            + gen_resp.body
+        };
     }
     return gen_json[0].get<std::string>();
 }

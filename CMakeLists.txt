@@ -129,6 +129,33 @@ message(STATUS "V8 libs:    ${V8_LIBRARIES}")
 # Library target (native: full flow with V8 + libcurl)
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Embed the rustypipe-style bg_full_bundle.min.js (bgutils-js + jsdom-minimal)
+# into a generated header so v8_runner.cpp can eval it inside the embedded V8
+# isolate. The bundle exposes globalThis.runBotguard / newMinter / mint.
+#
+# We splice the raw JS into a C++ raw string literal via cat — cmake's
+# file(WRITE) does ${VAR} expansion and \ escape processing on the contents,
+# which mangles minified JS that uses template literals and backslash escapes.
+# ---------------------------------------------------------------------------
+set(_bg_full_src ${CMAKE_CURRENT_SOURCE_DIR}/src/bg_full_bundle.min.js)
+set(_bg_full_hdr ${CMAKE_BINARY_DIR}/_generated/bg_full_bundle.h)
+file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/_generated)
+
+add_custom_command(
+    OUTPUT  ${_bg_full_hdr}
+    DEPENDS ${_bg_full_src}
+    COMMAND ${CMAKE_COMMAND} -E echo "#pragma once" > ${_bg_full_hdr}
+    COMMAND ${CMAKE_COMMAND} -E echo "// AUTO-GENERATED from src/bg_full_bundle.min.js -- do not edit." >> ${_bg_full_hdr}
+    COMMAND ${CMAKE_COMMAND} -E echo "namespace epotoken {" >> ${_bg_full_hdr}
+    COMMAND ${CMAKE_COMMAND} -E echo "inline constexpr const char* BG_FULL_BUNDLE_JS = R\"BG_BUNDLE_X9X(" >> ${_bg_full_hdr}
+    COMMAND cat ${_bg_full_src} >> ${_bg_full_hdr}
+    COMMAND ${CMAKE_COMMAND} -E echo ")BG_BUNDLE_X9X\";" >> ${_bg_full_hdr}
+    COMMAND ${CMAKE_COMMAND} -E echo "} // namespace epotoken" >> ${_bg_full_hdr}
+    VERBATIM
+)
+add_custom_target(_gen_bg_full_hdr DEPENDS ${_bg_full_hdr})
+
 add_library(epotoken STATIC
     src/base64.cpp
     src/http_client.cpp
@@ -137,13 +164,16 @@ add_library(epotoken STATIC
     src/placeholder.cpp
     src/v8_runner.cpp
     src/epotoken.cpp
+    ${_bg_full_hdr}
 )
+add_dependencies(epotoken _gen_bg_full_hdr)
 
 target_include_directories(epotoken
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_BINARY_DIR}/_generated
         ${V8_INCLUDE_DIRS}
 )
 

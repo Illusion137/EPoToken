@@ -6,8 +6,8 @@
 #   1. Calls epotoken_cli to generate a po_token and placeholder_po_token.
 #      The CLI creates its own Innertube session internally — no visitor_data
 #      needs to be supplied by the caller.
-#   2. POSTs the tokens as JSON to the validation server:
-#        POST ${BASE_URL}/validate_potoken/<video_id>
+#   2. Sends the tokens as JSON to the validation server:
+#        GET ${BASE_URL}/validate_potoken/<video_id>
 #        Content-Type: application/json
 #        {"po_token":"<token>","placeholder_po_token":"<placeholder>"}
 #   3. Interprets the response contract:
@@ -125,10 +125,10 @@ validate_one() {
     payload="$(printf '{"po_token":"%s","placeholder_po_token":"%s"}' \
         "${po_token}" "${placeholder_po_token}")"
 
-    # --- 3. POST to validation server ----------------------------------
+    # --- 3. GET request to validation server (body carries JSON payload) ----
     local response http_code body
     response="$(curl -sS -m "${TIMEOUT}" \
-        -X POST "${url}" \
+        -X GET "${url}" \
         -H "Content-Type: application/json" \
         -d "${payload}" \
         -w $'\n__HTTP_STATUS__:%{http_code}' 2>&1)"

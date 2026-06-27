@@ -36,6 +36,7 @@ if(EMSCRIPTEN)
         bindings/wasm/epotoken_wasm.cpp
         src/base64.cpp
         src/challenge.cpp
+        src/innertube_messages.cpp
         src/placeholder.cpp
     )
 
@@ -69,70 +70,58 @@ endif()
 
 find_package(CURL REQUIRED)
 
-find_package(PkgConfig QUIET)
-if(PkgConfig_FOUND)
-    pkg_check_modules(V8 QUIET v8)
+# ---------------------------------------------------------------------------
+# Hermes (replaces V8 as the BotGuard JS engine)
+# Set HERMES_ROOT to the Hermes install prefix if not in a standard location.
+# Download prebuilts from https://github.com/facebook/hermes/releases
+# or set HERMES_ROOT to your React Native SDK's hermes directory.
+# ---------------------------------------------------------------------------
+
+set(_hermes_hints
+    "${HERMES_ROOT}"
+    "/usr/local"
+    "/opt/homebrew"
+    # React Native SDK locations
+    "${CMAKE_CURRENT_SOURCE_DIR}/../node_modules/react-native/sdks/hermes"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../node_modules/react-native/sdks/hermes"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../node_modules/hermes-engine"
+)
+
+find_path(HERMES_INCLUDE_DIR
+    NAMES hermes/hermes.h
+    PATH_SUFFIXES include
+    PATHS ${_hermes_hints}
+    DOC "Hermes include directory"
+)
+
+find_library(HERMES_LIBRARY
+    NAMES hermes hermesvm
+    PATH_SUFFIXES lib
+    PATHS ${_hermes_hints}
+    DOC "Hermes library"
+)
+
+if(NOT HERMES_INCLUDE_DIR OR NOT HERMES_LIBRARY)
+    message(FATAL_ERROR
+        "Hermes not found. Set -DHERMES_ROOT=<prefix> or install from:\n"
+        "  https://github.com/facebook/hermes/releases\n"
+        "  npm install hermes-engine  (then -DHERMES_ROOT=node_modules/hermes-engine)\n"
+        "  Found include: ${HERMES_INCLUDE_DIR}\n"
+        "  Found library: ${HERMES_LIBRARY}"
+    )
 endif()
 
-if(NOT V8_FOUND)
-    find_path(V8_INCLUDE_DIR
-        NAMES v8.h
-        PATHS
-            /usr/include/v8
-            /usr/local/include/v8
-            /usr/include/node
-            /usr/local/include/node
-            /opt/homebrew/include/v8
-            ${V8_ROOT}/include
-        DOC "V8 include directory"
-    )
-    find_library(V8_LIBRARY
-        NAMES v8 v8_monolith
-        PATHS
-            /usr/lib
-            /usr/local/lib
-            /usr/lib/x86_64-linux-gnu
-            /opt/homebrew/lib
-            ${V8_ROOT}/lib
-        DOC "V8 shared/static library"
-    )
-    find_library(V8_PLATFORM_LIBRARY
-        NAMES v8_libplatform
-        PATHS
-            /usr/lib
-            /usr/local/lib
-            /usr/lib/x86_64-linux-gnu
-            /opt/homebrew/lib
-            ${V8_ROOT}/lib
-    )
-    if(V8_INCLUDE_DIR AND V8_LIBRARY)
-        set(V8_FOUND TRUE)
-        set(V8_INCLUDE_DIRS ${V8_INCLUDE_DIR})
-        set(V8_LIBRARIES ${V8_LIBRARY})
-        if(V8_PLATFORM_LIBRARY)
-            list(APPEND V8_LIBRARIES ${V8_PLATFORM_LIBRARY})
-        endif()
-    else()
-        message(FATAL_ERROR
-            "V8 not found. Install libv8-dev (Debian/Ubuntu) or node-dev,\n"
-            "or pass -DV8_ROOT=<prefix> to cmake.\n"
-            "  Found include: ${V8_INCLUDE_DIR}\n"
-            "  Found library: ${V8_LIBRARY}"
-        )
-    endif()
-endif()
-
-message(STATUS "V8 include: ${V8_INCLUDE_DIRS}")
-message(STATUS "V8 libs:    ${V8_LIBRARIES}")
+message(STATUS "Hermes include: ${HERMES_INCLUDE_DIR}")
+message(STATUS "Hermes library: ${HERMES_LIBRARY}")
 
 # ---------------------------------------------------------------------------
-# Library target (native: full flow with V8 + libcurl)
+# Library target (native: full flow with Hermes + libcurl)
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # Embed the rustypipe-style bg_full_bundle.min.js (bgutils-js + jsdom-minimal)
-# into a generated header so v8_runner.cpp can eval it inside the embedded V8
-# isolate. The bundle exposes globalThis.runBotguard / newMinter / mint.
+# into a generated header so hermes_runner.cpp can eval it inside the Hermes
+# runtime. The bundle exposes globalThis.runBotguard / newMinter / mint.
 #
 # We splice the raw JS into a C++ raw string literal via cat — cmake's
 # file(WRITE) does ${VAR} expansion and \ escape processing on the contents,
@@ -160,9 +149,10 @@ add_library(epotoken STATIC
     src/base64.cpp
     src/http_client.cpp
     src/challenge.cpp
+    src/innertube_messages.cpp
     src/innertube_client.cpp
     src/placeholder.cpp
-    src/v8_runner.cpp
+    src/hermes_runner.cpp
     src/epotoken.cpp
     ${_bg_full_hdr}
 )
@@ -174,7 +164,7 @@ target_include_directories(epotoken
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_BINARY_DIR}/_generated
-        ${V8_INCLUDE_DIRS}
+        ${HERMES_INCLUDE_DIR}
 )
 
 target_link_libraries(epotoken
@@ -182,12 +172,7 @@ target_link_libraries(epotoken
         nlohmann_json::nlohmann_json
     PRIVATE
         CURL::libcurl
-        ${V8_LIBRARIES}
-)
-
-target_compile_definitions(epotoken PRIVATE
-    V8_COMPRESS_POINTERS
-    V8_31BIT_SMIS_ON_64BIT_ARCH
+        ${HERMES_LIBRARY}
 )
 
 # ---------------------------------------------------------------------------

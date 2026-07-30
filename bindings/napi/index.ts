@@ -7,9 +7,21 @@
  *   V8 instance, no extra dependencies.
  */
 
-import * as addon from './build/Release/epotoken_napi.node';
+import * as path from 'path';
 import { BotGuardClient, WebPoMinter } from 'bgutils-js';
 import type { IBgConfig } from 'bgutils-js';
+
+// node-gyp-build looks in <pkg>/prebuilds/ first (prebuilt binary for the
+// current platform), then falls back to <pkg>/build/Release/ (source build).
+// __dirname is <pkg>/dist at runtime, so we point one level up.
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const addon = require('node-gyp-build')(
+    path.resolve(__dirname, '..')
+) as {
+    getAttestationChallenge(): Promise<ChallengeResult>;
+    postGenerateIT(snapshot: string): Promise<string>;
+    generatePlaceholderToken(identifier: string, clientState: number): string;
+};
 
 // ---------------------------------------------------------------------------
 // Types

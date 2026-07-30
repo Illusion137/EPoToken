@@ -1,0 +1,107 @@
+name: Publish epotoken-napi
+
+# Trigger by pushing a tag like napi-v0.1.0
+on:
+  push:
+    tags:
+      - 'napi-v*.*.*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build prebuilds only, do not publish'
+        type: boolean
+        default: false
+
+defaults:
+  run:
+    working-directory: bindings/napi
+
+jobs:
+  # -----------------------------------------------------------------------
+  # 1. Build prebuilt addon for each supported platform / arch.
+  # Artifacts get stitched together by the publish job.
+  # -----------------------------------------------------------------------
+  prebuild:
+    name: Prebuild (${{ matrix.os }} ${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  arch: x64 }
+          - { os: ubuntu-22.04-arm, arch: arm64 }
+          - { os: macos-13,       arch: x64 }
+          - { os: macos-latest,   arch: arm64 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install libcurl (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
+
+      # macOS ships libcurl in the SDK; nothing to install.
+
+      - name: Install deps
+        run: npm install --ignore-scripts
+
+      - name: Sync core sources
+        run: npm run sync:core
+
+      - name: Build prebuild
+        run: npx prebuildify --napi --strip --tag-libc --arch ${{ matrix.arch }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prebuilds-${{ matrix.os }}-${{ matrix.arch }}
+          path: bindings/napi/prebuilds/
+
+  # -----------------------------------------------------------------------
+  # 2. Collect prebuilds and publish to npm.
+  # Requires repo secret NPM_TOKEN (npm automation token, publish scope).
+  # -----------------------------------------------------------------------
+  publish:
+    name: Publish to npm
+    needs: prebuild
+    runs-on: ubuntu-latest
+    if: ${{ !inputs.dry_run }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install deps (skip postinstall)
+        run: npm install --ignore-scripts
+
+      - name: Sync core sources
+        run: npm run sync:core
+
+      - name: Build TypeScript
+        run: npm run build:ts
+
+      - name: Download all prebuilds
+        uses: actions/download-artifact@v4
+        with:
+          pattern: prebuilds-*
+          path: bindings/napi/prebuilds-staging/
+          merge-multiple: true
+
+      - name: Stage prebuilds into package
+        run: |
+          mkdir -p prebuilds
+          cp -r prebuilds-staging/* prebuilds/
+          ls -R prebuilds
+
+      - name: Publish
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

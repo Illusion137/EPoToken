@@ -1,0 +1,15 @@
+{
+  "cxxNamespace": ["margelo", "nitro", "epotoken"],
+  "ios": {
+    "iosModulename": "EPoToken"
+  },
+  "android": {
+    "androidNamespace": ["epotoken"],
+    "androidCxxLibName": "EPoToken"
+  },
+  "autolinking": {
+    "EPoToken": {
+      "cpp": "HybridEPoToken"
+    }
+  }
+}

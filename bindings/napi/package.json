@@ -1,23 +1,39 @@
 {
   "name": "epotoken-napi",
   "version": "0.1.0",
-  "description": "Node.js N-API addon for EPoToken — C++ Innertube challenge + GenerateIT HTTP, placeholder token generation",
+  "description": "Node.js N-API addon for EPoToken: YouTube PoToken generation (Innertube /att/get + jnn-pa GenerateIT) with cold-start placeholder token.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "prebuilds",
+    "cpp",
+    "binding.gyp",
+    "epotoken_napi.cpp",
+    "index.ts",
+    "tsconfig.json"
+  ],
   "scripts": {
-    "build:native": "node-gyp configure build",
-    "build:ts": "tsc",
-    "build": "npm run build:native && npm run build:ts",
-    "rebuild": "node-gyp rebuild && npm run build:ts"
+    "sync:core":      "node ../../scripts/sync-core.js cpp/core",
+    "build:native":   "node-gyp configure build",
+    "build:ts":       "tsc",
+    "build":          "npm run sync:core && npm run build:native && npm run build:ts",
+    "rebuild":        "npm run sync:core && node-gyp rebuild && npm run build:ts",
+    "prebuild":       "npm run sync:core && prebuildify --napi --strip --tag-libc",
+    "install":        "node-gyp-build",
+    "prepare":        "node ../../scripts/sync-core.js cpp/core || true",
+    "prepublishOnly": "npm run sync:core && npm run build:ts"
   },
   "dependencies": {
-    "bgutils-js": "^2.0.0"
+    "bgutils-js":     "^2.0.0",
+    "node-addon-api": "^8.0.0",
+    "node-gyp-build": "^4.8.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "node-addon-api": "^8.0.0",
-    "node-gyp": "^10.0.0",
-    "typescript": "^5.0.0"
+    "node-gyp":    "^10.0.0",
+    "prebuildify": "^6.0.0",
+    "typescript":  "^5.0.0"
   },
   "gypfile": true
 }

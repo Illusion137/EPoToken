@@ -4,8 +4,11 @@
 
 int main(int argc, char** argv) {
     const std::string content_binding = argc >= 2 ? argv[1] : "";
+    const std::string interpreter_url = argc >= 3 ? argv[2] : "";
 
-    auto result = generate_po_token(content_binding);
+    auto result = interpreter_url.empty()
+        ? generate_po_token(content_binding)
+        : generate_po_token(content_binding, interpreter_url);
 
     if (auto* err = std::get_if<epotoken::error>(&result)) {
         fprintf(stderr, "ERROR [%s]: %s\n", err->code.c_str(), err->message.c_str());

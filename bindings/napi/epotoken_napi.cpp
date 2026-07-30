@@ -15,9 +15,9 @@
 
 #include <napi.h>
 
-#include "../../include/epotoken.h"
-#include "../../src/challenge.h"
-#include "../../src/innertube_client.h"
+#include "epotoken.h"
+#include "challenge.h"
+#include "innertube_client.h"
 
 // ---------------------------------------------------------------------------
 // getAttestationChallenge — creates a fresh Innertube session internally

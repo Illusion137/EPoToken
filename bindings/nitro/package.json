@@ -1,0 +1,45 @@
+{
+  "name": "react-native-epotoken",
+  "version": "0.1.0",
+  "description": "React Native Nitro Module for EPoToken: pure-compute primitives for YouTube PoToken generation (visitor_data, body builders, parsers, placeholder token).",
+  "main": "lib/commonjs/index.js",
+  "module": "lib/module/index.js",
+  "types": "lib/typescript/src/index.d.ts",
+  "react-native": "src/index.ts",
+  "source": "src/index.ts",
+  "files": [
+    "src",
+    "lib",
+    "cpp",
+    "ios",
+    "android",
+    "nitrogen",
+    "nitro.json",
+    "react-native-epotoken.podspec",
+    "!**/.DS_Store"
+  ],
+  "scripts": {
+    "sync:core":      "node ../../scripts/sync-core.js cpp/core",
+    "nitrogen":       "nitrogen",
+    "typecheck":      "tsc --noEmit",
+    "build:ts":       "bob build",
+    "prepare":        "node ../../scripts/sync-core.js cpp/core || true",
+    "prepublishOnly": "npm run sync:core && npm run nitrogen && npm run build:ts"
+  },
+  "peerDependencies": {
+    "react":                       "*",
+    "react-native":                "*",
+    "react-native-nitro-modules":  "*"
+  },
+  "devDependencies": {
+    "react-native-nitro-modules": "^0.20.0",
+    "nitro-codegen":              "^0.20.0",
+    "react-native-builder-bob":   "^0.30.0",
+    "typescript":                 "^5.0.0"
+  },
+  "codegenConfig": {
+    "name":   "RNEPoTokenSpec",
+    "type":   "modules",
+    "jsSrcsDir": "src"
+  }
+}

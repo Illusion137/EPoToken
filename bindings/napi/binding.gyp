@@ -4,16 +4,17 @@
       "target_name": "epotoken_napi",
       "sources": [
         "epotoken_napi.cpp",
-        "../../src/base64.cpp",
-        "../../src/http_client.cpp",
-        "../../src/challenge.cpp",
-        "../../src/innertube_client.cpp",
-        "../../src/placeholder.cpp"
+        "cpp/core/src/base64.cpp",
+        "cpp/core/src/http_client.cpp",
+        "cpp/core/src/challenge.cpp",
+        "cpp/core/src/innertube_messages.cpp",
+        "cpp/core/src/innertube_client.cpp",
+        "cpp/core/src/placeholder.cpp"
       ],
       "include_dirs": [
         "<!@(node -p \"require('node-addon-api').include\")",
-        "../../include",
-        "../../src"
+        "cpp/core/include",
+        "cpp/core/src"
       ],
       "dependencies": [
         "<!(node -p \"require('node-addon-api').gyp\")"

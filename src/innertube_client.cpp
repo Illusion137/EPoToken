@@ -11,6 +11,7 @@
 #include "base64.h"
 #include "constants.h"
 #include "http_client.h"
+#include "innertube_messages.h"
 
 #include <nlohmann/json.hpp>
 #include <algorithm>
@@ -23,112 +24,11 @@ namespace epotoken {
 
 using json = nlohmann::json;
 
-// ===========================================================================
-// VisitorData protobuf helpers
-// Mirrors ProtoUtils.encodeVisitorData / decodeVisitorData in YouTubei.js.
-//
-// Proto schema:
-//   message VisitorData {
-//     string id        = 1;   // wire type 2 (length-delimited)
-//     uint32 timestamp = 2;   // wire type 0 (varint)
-//   }
-// ===========================================================================
+// Proto-encoding for visitor_data + GenerateIT body builders live in
+// innertube_messages.cpp so the WASM build can share them without dragging in
+// the HTTP client. This file only contains the network-bound flows.
 
 namespace {
-
-void write_varint(std::vector<uint8_t>& buf, uint64_t val) {
-    do {
-        uint8_t byte = val & 0x7F;
-        val >>= 7;
-        if (val) byte |= 0x80;
-        buf.push_back(byte);
-    } while (val);
-}
-
-uint64_t read_varint(const std::vector<uint8_t>& data, size_t& pos) {
-    uint64_t val   = 0;
-    int      shift = 0;
-    while (pos < data.size()) {
-        uint8_t b = data[pos++];
-        val |= static_cast<uint64_t>(b & 0x7F) << shift;
-        shift += 7;
-        if (!(b & 0x80)) break;
-    }
-    return val;
-}
-
-// Encodes { id, timestamp } as a protobuf, then base64url-encodes the result.
-// Mirrors: encodeURIComponent(u8ToBase64(proto).replace(+,-).replace(/,_))
-// We drop the encodeURIComponent() since the string is used in JSON bodies and
-// headers — not in URL query strings — and the url_safe base64 has no =/+/ chars.
-std::string encode_visitor_data(const std::string& id, uint32_t timestamp) {
-    std::vector<uint8_t> buf;
-
-    // Field 1: string (tag = (1 << 3) | 2 = 0x0A)
-    buf.push_back(0x0A);
-    write_varint(buf, id.size());
-    for (unsigned char c : id) buf.push_back(c);
-
-    // Field 2: uint32 (tag = (2 << 3) | 0 = 0x10)
-    buf.push_back(0x10);
-    write_varint(buf, timestamp);
-
-    return base64::encode(buf, /*url_safe=*/true);
-}
-
-// Decodes a visitor_data string and returns the embedded id field.
-// Mirrors: decodeVisitorData(visitor_data).id
-std::string decode_visitor_data_id(const std::string& visitor_data) {
-    // Handle %xx URL-encoding that encodeURIComponent() may have added.
-    std::string raw;
-    raw.reserve(visitor_data.size());
-    for (size_t i = 0; i < visitor_data.size(); ++i) {
-        if (visitor_data[i] == '%' && i + 2 < visitor_data.size()) {
-            auto hex = [](char c) -> int {
-                if (c >= '0' && c <= '9') return c - '0';
-                if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-                if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-                return -1;
-            };
-            int hi = hex(visitor_data[i+1]);
-            int lo = hex(visitor_data[i+2]);
-            if (hi >= 0 && lo >= 0) {
-                raw += static_cast<char>((hi << 4) | lo);
-                i += 2;
-                continue;
-            }
-        }
-        raw += visitor_data[i];
-    }
-
-    auto bytes = base64::decode(raw);
-
-    size_t pos = 0;
-    while (pos < bytes.size()) {
-        uint8_t  tag        = bytes[pos++];
-        uint8_t  field_num  = tag >> 3;
-        uint8_t  wire_type  = tag & 0x07;
-
-        if (wire_type == 2) {                        // length-delimited
-            uint64_t len = read_varint(bytes, pos);
-            if (field_num == 1 && pos + len <= bytes.size()) {
-                return std::string(
-                    bytes.begin() + static_cast<ptrdiff_t>(pos),
-                    bytes.begin() + static_cast<ptrdiff_t>(pos + len));
-            }
-            pos += static_cast<size_t>(len);
-        } else if (wire_type == 0) {                 // varint
-            read_varint(bytes, pos);
-        } else if (wire_type == 5) {                 // 32-bit fixed
-            pos += 4;
-        } else if (wire_type == 1) {                 // 64-bit fixed
-            pos += 8;
-        } else {
-            break;                                   // unknown wire type
-        }
-    }
-    return "";
-}
 
 // ===========================================================================
 // Session data — all fields extracted from sw.js_data and used in context
@@ -301,70 +201,36 @@ session_data fetch_session() {
 }
 
 // ---------------------------------------------------------------------------
-// Build full Innertube WEB context — mirrors Session.ts #buildContext().
+// Adapter: build the context-overrides struct that innertube_messages consumes
+// from the richer session_data this file populates from /sw.js_data.
+// session-only fields (remote_host, device_make/model, experiment ids, etc.)
+// are appended to the JSON post-hoc since they're absent from the WASM path.
 // ---------------------------------------------------------------------------
-json build_context(const session_data& sd) {
-    // utcOffsetMinutes: -Math.floor(new Date().getTimezoneOffset())
-    // getTimezoneOffset() returns (UTC - local) in minutes; negate for (local - UTC).
-    // We default to 0 (UTC) since computing the system offset from a string tz is
-    // non-trivial; callers on real hardware will get the server's TZ anyway.
-    const int utc_offset_minutes = 0;
+std::string build_att_get_body_from_session(const session_data& sd) {
+    innertube_context_overrides opts;
+    opts.visitor_data    = sd.visitor_data;
+    opts.client_version  = sd.client_version;
+    opts.hl              = sd.hl;
+    opts.gl              = sd.gl;
+    opts.os_name         = sd.os_name;
+    opts.os_version      = sd.os_version;
+    opts.browser_name    = sd.browser_name;
+    opts.browser_version = sd.browser_version;
+    opts.time_zone       = sd.time_zone;
 
-    json context = {
-        {"client", {
-            {"hl",                    sd.hl.empty()             ? "en"              : sd.hl},
-            {"gl",                    sd.gl.empty()             ? "US"              : sd.gl},
-            {"visitorData",           sd.visitor_data},
-            {"userAgent",             constants::USER_AGENT},
-            {"clientName",            constants::INNERTUBE_CLIENT_NAME},
-            {"clientVersion",         sd.client_version},
-            {"osName",                sd.os_name.empty()        ? "Windows"         : sd.os_name},
-            {"osVersion",             sd.os_version.empty()     ? "10.0"            : sd.os_version},
-            {"platform",              "DESKTOP"},
-            {"clientFormFactor",      "UNKNOWN_FORM_FACTOR"},
-            {"userInterfaceTheme",    "USER_INTERFACE_THEME_LIGHT"},
-            {"browserName",           sd.browser_name.empty()   ? "Chrome"          : sd.browser_name},
-            {"browserVersion",        sd.browser_version.empty()? "130.0.0.0"       : sd.browser_version},
-            {"screenDensityFloat",    1},
-            {"screenPixelDensity",    1},
-            {"screenHeightPoints",    constants::SCREEN_HEIGHT},
-            {"screenWidthPoints",     constants::SCREEN_WIDTH},
-            {"utcOffsetMinutes",      utc_offset_minutes},
-            {"timeZone",              sd.time_zone.empty()      ? "America/New_York" : sd.time_zone},
-            {"memoryTotalKbytes",     "8000000"},
-            {"originalUrl",           constants::YT_BASE_URL},
-            {"mainAppWebInfo", {
-                {"graftUrl",                    constants::YT_BASE_URL},
-                {"pwaInstallabilityStatus",     "PWA_INSTALLABILITY_STATUS_UNKNOWN"},
-                {"webDisplayMode",              "WEB_DISPLAY_MODE_BROWSER"},
-                {"isWebNativeShareAvailable",   true}
-            }}
-        }},
-        {"user", {
-            {"enableSafetyMode", false},
-            {"lockedSafetyMode", false}
-        }},
-        {"request", {
-            {"useSsl", true},
-            {"internalExperimentFlags", json::array()}
-        }}
-    };
+    json body = json::parse(build_att_get_body(opts));
 
-    // Optional fields — only include when present
-    if (!sd.remote_host.empty())
-        context["client"]["remoteHost"] = sd.remote_host;
-    if (!sd.device_make.empty())
-        context["client"]["deviceMake"] = sd.device_make;
-    if (!sd.device_model.empty())
-        context["client"]["deviceModel"] = sd.device_model;
-    if (!sd.rollout_token.empty())
-        context["client"]["rolloutToken"] = sd.rollout_token;
-    if (!sd.device_experiment_id.empty())
-        context["client"]["deviceExperimentId"] = sd.device_experiment_id;
+    // Splice in the device-info fields that only come from /sw.js_data.
+    auto& client = body["context"]["client"];
+    if (!sd.remote_host.empty())          client["remoteHost"]         = sd.remote_host;
+    if (!sd.device_make.empty())          client["deviceMake"]         = sd.device_make;
+    if (!sd.device_model.empty())         client["deviceModel"]        = sd.device_model;
+    if (!sd.rollout_token.empty())        client["rolloutToken"]       = sd.rollout_token;
+    if (!sd.device_experiment_id.empty()) client["deviceExperimentId"] = sd.device_experiment_id;
     if (!sd.app_install_data.empty())
-        context["client"]["configInfo"] = {{"appInstallData", sd.app_install_data}};
+        client["configInfo"] = {{"appInstallData", sd.app_install_data}};
 
-    return context;
+    return body.dump();
 }
 
 // ---------------------------------------------------------------------------
@@ -400,21 +266,6 @@ http::request_options innertube_post_opts(
 // ===========================================================================
 
 // ---------------------------------------------------------------------------
-// generate_visitor_data — creates a fresh protobuf-encoded visitor_data string.
-// Callers can use this as a fallback when /att/get fails and they still need
-// a valid visitor_data for the result.
-// ---------------------------------------------------------------------------
-
-std::string generate_visitor_data() {
-    // Only used as a last-resort fallback when /sw.js_data is unreachable.
-    // STATIC_VISITOR_ID is the same constant YouTubei.js uses in this scenario.
-    const uint32_t ts = static_cast<uint32_t>(
-        std::chrono::duration_cast<std::chrono::seconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count());
-    return encode_visitor_data(constants::STATIC_VISITOR_ID, ts);
-}
-
-// ---------------------------------------------------------------------------
 // get_attestation_challenge — creates a fresh Innertube WEB session then
 // calls /att/get. Mirrors innertube.getAttestationChallenge('ENGAGEMENT_TYPE_UNBOUND').
 // Returns both the challenge and the session visitor_data.
@@ -435,11 +286,7 @@ attestation_outcome get_attestation_challenge() {
     }
 
     // 2. Build the Innertube WEB request body
-    const json body_json = {
-        {"context",        build_context(sd)},
-        {"engagementType", "ENGAGEMENT_TYPE_UNBOUND"}
-    };
-    const std::string body_str = body_json.dump();
+    const std::string body_str = build_att_get_body_from_session(sd);
 
     // 3. POST /youtubei/v1/att/get?prettyPrint=false&alt=json
     const std::string url =
@@ -473,12 +320,9 @@ attestation_outcome get_attestation_challenge() {
 challenge_outcome fetch_challenge() {
     using namespace constants;
 
-    json payload = json::array();
-    payload.push_back(REQUEST_KEY);
-
     http::request_options opts;
     opts.method = "POST";
-    opts.body   = payload.dump();
+    opts.body   = build_challenge_create_body();
     opts.headers = {
         {"content-type",  "application/json+protobuf"},
         {"x-goog-api-key", GOOG_API_KEY},
@@ -507,13 +351,9 @@ std::variant<std::string, challenge_error>
 post_generate_it(const std::string& snapshot) {
     using namespace constants;
 
-    json payload = json::array();
-    payload.push_back(REQUEST_KEY);
-    payload.push_back(snapshot);
-
     http::request_options opts;
     opts.method = "POST";
-    opts.body   = payload.dump();
+    opts.body   = build_generate_it_body(snapshot);
     opts.headers = {
         {"content-type",  "application/json+protobuf"},
         {"x-goog-api-key", GOOG_API_KEY},
@@ -531,19 +371,7 @@ post_generate_it(const std::string& snapshot) {
             "GenerateIT returned HTTP " + std::to_string(gen_resp.status)
         };
     }
-
-    json gen_json;
-    try { gen_json = json::parse(gen_resp.body); }
-    catch (...) {
-        return challenge_error{"Failed to parse GenerateIT response as JSON"};
-    }
-    if (!gen_json.is_array() || gen_json.empty() || !gen_json[0].is_string()) {
-        return challenge_error{
-            "Could not extract integrity token from GenerateIT response (snapshot rejected): "
-            + gen_resp.body
-        };
-    }
-    return gen_json[0].get<std::string>();
+    return parse_generate_it_response(gen_resp.body);
 }
 
 } // namespace epotoken

@@ -1,0 +1,56 @@
+name: Publish react-native-epotoken
+
+# Trigger by pushing a tag like nitro-v0.1.0
+on:
+  push:
+    tags:
+      - 'nitro-v*.*.*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Pack only, do not publish'
+        type: boolean
+        default: false
+
+defaults:
+  run:
+    working-directory: bindings/nitro
+
+jobs:
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install deps (skip postinstall)
+        run: npm install --ignore-scripts
+
+      - name: Sync core sources
+        run: npm run sync:core
+
+      - name: Run nitrogen
+        run: npm run nitrogen
+
+      - name: Build TypeScript
+        run: npm run build:ts
+
+      - name: Pack tarball
+        run: npm pack
+
+      - name: Show tarball contents
+        run: tar -tzf react-native-epotoken-*.tgz | head -60
+
+      - name: Publish
+        if: ${{ !inputs.dry_run }}
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

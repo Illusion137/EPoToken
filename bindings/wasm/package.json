@@ -1,0 +1,23 @@
+{
+  "name": "epotoken-wasm",
+  "version": "0.1.0",
+  "description": "EPoToken WASM binding — pure-compute primitives + JS-driven fetch + bgutils-js flow",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "epotoken.js",
+    "epotoken.wasm"
+  ],
+  "scripts": {
+    "build:wasm": "emcmake cmake -B ../../build_wasm -DCMAKE_BUILD_TYPE=Release && cmake --build ../../build_wasm --target epotoken_wasm && cp ../../build_wasm/epotoken_wasm.js ./epotoken.js && cp ../../build_wasm/epotoken_wasm.wasm ./epotoken.wasm",
+    "build:ts": "tsc",
+    "build": "npm run build:wasm && npm run build:ts"
+  },
+  "dependencies": {
+    "bgutils-js": "^2.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}

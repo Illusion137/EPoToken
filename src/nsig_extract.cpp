@@ -7,6 +7,9 @@
 #include "llvh/Support/MemoryBuffer.h"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
 #include <functional>
 #include <map>
 #include <memory>
@@ -1558,7 +1561,18 @@ std::string selectClosure(const std::string& src){
     std::unordered_map<std::string,std::vector<int>> nameToRegions, baseToRegions;
     auto addIdx=[&](std::unordered_map<std::string,std::vector<int>>& m,const std::string& k,int idx){ m[k].push_back(idx); };
     for(int r=0;r<(int)regions.size();r++){
-        for(auto& d:regions[r].decls){ addIdx(nameToRegions,d,r); std::string bse=d.substr(0,d.find_first_of(".[")); if(!bse.empty())addIdx(baseToRegions,bse,r); }
+        for(auto& d:regions[r].decls){
+            // Member names (`X.y`) are recorded only once — the analyzer keeps the
+            // first assignment as the declared variable and skips reassignments
+            // (`if declaredVariables.has(name) continue`). A reused member like
+            // `g.r` gets reassigned many times; mapping it to every reassignment
+            // pulled all their unrelated dependencies (the main over-inclusion).
+            // Plain names keep all regions (e.g. predeclared `var x` + later `x=`).
+            bool isMember=d.find('.')!=std::string::npos||d.find('[')!=std::string::npos;
+            if(isMember && nameToRegions.count(d)) { /* keep first only */ }
+            else addIdx(nameToRegions,d,r);
+            std::string bse=d.substr(0,d.find_first_of(".[")); if(!bse.empty())addIdx(baseToRegions,bse,r);
+        }
         for(auto& b:regions[r].bases)addIdx(baseToRegions,b,r);
     }
 
@@ -1632,7 +1646,6 @@ std::string selectClosure(const std::string& src){
         for(auto& nm:refs.ids){ if(nm==iife.param)continue; includeIdentifier(nm); }
     }
 
-    if(std::getenv("EPO_CHUNK_DBG"))std::fprintf(stderr,"[chunk] regions=%zu kept=%zu stubs=%zu\n",regions.size(),kept.size(),stubs.size());
     std::vector<int> sorted(kept.begin(),kept.end());
     std::sort(sorted.begin(),sorted.end());
     std::string out; out.reserve(1<<19);
@@ -1689,16 +1702,30 @@ result extract_from_source(const std::string& source_js) {
     return r;
 }
 
+// Reads the signatureTimestamp value directly from source (stable literal).
+static int parseSts(const std::string& s) {
+    size_t p = s.find("signatureTimestamp");
+    if (p == std::string::npos) return 0;
+    p += 18;
+    while (p < s.size() && (s[p] == ' ' || s[p] == ':' || s[p] == '\t')) p++;
+    int v = 0; bool any = false;
+    while (p < s.size() && s[p] >= '0' && s[p] <= '9') { v = v * 10 + (s[p] - '0'); p++; any = true; }
+    return any ? v : 0;
+}
+
 result extract(const std::string& player_js) {
-    // Select just the nsig dependency closure so the analyzer parses ~1.2 MB
+    // Select just the nsig dependency closure so the analyzer parses ~0.2 MB
     // instead of the full 2.5 MB (keeps the AST arena small). Falls back to the
     // whole file if the reduced source somehow fails to yield the function.
     std::string reduced = chunk::selectClosure(player_js);
     result r = extract_from_source(reduced);
     if (!r.ok) {
         result full = extract_from_source(player_js);
-        if (full.ok) return full;
+        if (full.ok) r = full;
     }
+    // signatureTimestamp is a stable literal; read it directly if the analyzer's
+    // matcher didn't capture it (its first-match can differ on reduced source).
+    if (r.sts == 0) { int s = parseSts(reduced); if (!s) s = parseSts(player_js); r.sts = s; }
     return r;
 }
 

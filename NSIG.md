@@ -11,16 +11,16 @@ emit a small self-contained decipher script, and run it to transform `n`.
 
 ## Status
 
-- **Time:** ~0.2–0.7 s end-to-end (was ~27 min). ✅
-- **Memory:** ~74–77 MB combined peak (was ~154 MB). Extraction ~52 MB + decipher VM ~18 MB.
-- Correctness: **40/40** random `n` vectors match the reference YouTube.js pipeline.
+- **Time:** ~0.4 s end-to-end (was ~27 min). ✅
+- **Memory:** **~44 MB combined peak RSS** (was ~154 MB): extraction ~26 MB + decipher VM ~16 MB. ✅
+- Correctness: **60/60** random `n` vectors match the reference YouTube.js pipeline.
 
-The remaining memory gap toward a ~60 MB budget is the lexical closure selector's
-inherent over-inclusion (see below): it keeps ~6× the declarations the extractor
-ultimately emits, so meriyah/Hermes parses ~1.2 MB of reduced source instead of
-the true ~0.2 MB closure. Closing this requires a streaming exact-closure
-analyzer (run `findDependencies`/`visit` region-by-region, discarding ASTs, then
-re-parse only the true closure) — projected ~35–40 MB combined.
+The closure selector now matches the analyzer's dependency semantics closely
+(notably: a reused member like `g.r`, reassigned many times, is recorded **once**
+— the analyzer's `if declaredVariables.has(name) continue`). That cut the reduced
+source from ~1.2 MB → **~0.18 MB** (kept regions 6257 → 1349), so Hermes parses
+only the true nsig closure. Stripped initializers are stubbed, and the timestamp
+region is included without following its dependency tree.
 
 ## Architecture: native parse in C++
 
@@ -37,8 +37,8 @@ chunking/closure-selection needed.
 
 | phase | where | cost | notes |
 |-------|-------|------|-------|
-| **extract** | C++ (`nsig_extract.cpp`) | ~0.7 s, ~85 MB | one-time per player version; cache the ~180 KB `output` by player id |
-| **setup + decipher** | Hermes runtime (`nsig_runner.cpp`) | ~few ms | per stream URL; only the ~180 KB output is parsed |
+| **extract** | C++ (`nsig_extract.cpp`) | ~0.06 s, ~26 MB | closure-selected: parses ~0.18 MB, not 2.5 MB; cache the ~180 KB `output` by player id |
+| **setup + decipher** | Hermes runtime (`nsig_runner.cpp`) | ~few ms, +16 MB | per stream URL; only the ~180 KB output is parsed |
 
 base.js changes ~weekly; the extracted script is cached by player id
 (`nsig_client.cpp`), so extraction runs at most once per version.
@@ -54,35 +54,24 @@ member-chain dependencies (`g.o_`), reused prototype-alias blocks
 
 ## Benchmarks
 
-Player `02fa8099`, base.js = 2.5 MB. Native extraction, `/usr/bin/time -l`:
+Player `02fa8099`, base.js = 2.5 MB, release Hermes, end-to-end CLI
+(`epotoken_cli nsig <n> base.js` → select closure → extract → setup → decipher),
+`/usr/bin/time -l`:
 
 ```
-extract:  0.7 s        (native Hermes parse + C++ analysis)
-          85 MB RSS    (AST arena for the full file)
-decipher: a few ms per n
+extract phase:   ~0.06 s   ~26 MB   (parses ~0.18 MB closure, not 2.5 MB)
+decipher phase:  ~few ms   +16 MB   (Hermes VM + ~180 KB output)
+combined:        ~0.4 s    ~44 MB peak RSS
 ```
 
-End-to-end CLI (fetch-from-disk → extract → decipher), first call:
+Correctness: **60/60** random `n` vectors identical to the reference pipeline.
 
-```
-1.4 s wall,  ~115 MB peak RSS
-```
+vs. the original meriyah-in-Hermes approach: **~27 min, ~154 MB**.
 
-vs. the previous meriyah-in-Hermes approach: **~27 min, ~154 MB**.
-
-### Memory note (Hermes build type)
-
-The ~85 MB extraction arena and the ~30 MB the decipher runtime adds are both
-inflated by the **debug** Hermes build used here
-(`CMAKE_BUILD_TYPE=Debug` — the same reason the old in-VM approach was minutes
-slow). Debug builds enlarge every AST node and disable allocator packing. A
-**release** Hermes (what React Native ships) roughly halves the arena, bringing
-the combined first-call peak comfortably under 100 MB. Cached decipher-only calls
-(the steady state during playback) are ~40 MB regardless.
-
-The parser's AST arena is freed after extraction but not always returned to the OS
-by the allocator, so `nsig_client.cpp` calls `malloc_trim`/`malloc_zone_pressure_relief`
-between phases (effective on glibc).
+The whole-file native parse (no closure selection) is ~72 MB regardless of build
+type — the closure selector is what makes the ~26 MB extraction possible. The
+parser's AST arena is freed after extraction; `nsig_client.cpp` also calls
+`malloc_trim`/`malloc_zone_pressure_relief` between phases.
 
 ## C++ API
 

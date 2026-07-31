@@ -115,6 +115,48 @@ message(STATUS "Hermes include: ${HERMES_INCLUDE_DIR}")
 message(STATUS "Hermes library: ${HERMES_LIBRARY}")
 
 # ---------------------------------------------------------------------------
+# Hermes compiler frontend (parser + AST) — used by src/nsig_extract.cpp to
+# parse base.js natively (~0.7s / ~85MB for the full 2.5MB file) instead of
+# running meriyah inside the interpreted VM.
+#
+# This needs the Hermes *source* tree (include/hermes/Parser, ESTree.h) and the
+# static frontend libraries from a Hermes *build* tree. Point at them with
+#   -DHERMES_SRC_ROOT=<hermes-source>  -DHERMES_BUILD_ROOT=<hermes-build>
+# ---------------------------------------------------------------------------
+set(HERMES_SRC_ROOT   "" CACHE PATH "Hermes source tree (has include/hermes/Parser/JSParser.h)")
+set(HERMES_BUILD_ROOT "" CACHE PATH "Hermes build tree (has lib/Parser/libhermesParser.a)")
+
+find_path(HERMES_PARSER_INCLUDE_DIR hermes/Parser/JSParser.h
+    PATHS ${HERMES_SRC_ROOT}/include ${HERMES_INCLUDE_DIR})
+
+if(HERMES_PARSER_INCLUDE_DIR AND HERMES_BUILD_ROOT)
+    set(_llvh_src_inc ${HERMES_SRC_ROOT}/external/llvh/include)
+    set(_llvh_bld_inc ${HERMES_BUILD_ROOT}/external/llvh/include)
+    # Locate each static frontend lib in the build tree.
+    set(HERMES_COMPILER_LIBS "")
+    foreach(_lib hermesParser hermesAST hermesSupport hermesFrontEndDefs
+                 hermesSourceMap hermesRegex hermesPlatformUnicode hermesADT
+                 LLVHSupport LLVHDemangle)
+        find_library(_hc_${_lib} ${_lib}
+            PATHS ${HERMES_BUILD_ROOT}
+            PATH_SUFFIXES lib lib/Parser lib/AST lib/Support lib/FrontEndDefs
+                          lib/SourceMap lib/Regex lib/Platform/Unicode lib/ADT
+                          external/llvh/lib/Support external/llvh/lib/Demangle
+            NO_DEFAULT_PATH)
+        if(_hc_${_lib})
+            list(APPEND HERMES_COMPILER_LIBS ${_hc_${_lib}})
+        endif()
+    endforeach()
+    set(HERMES_NATIVE_PARSER ON)
+    message(STATUS "Hermes native parser: ON (${HERMES_PARSER_INCLUDE_DIR})")
+else()
+    set(HERMES_NATIVE_PARSER OFF)
+    message(FATAL_ERROR
+        "Native nsig parser needs the Hermes source+build tree.\n"
+        "  Set -DHERMES_SRC_ROOT=<hermes-source> -DHERMES_BUILD_ROOT=<hermes-build>")
+endif()
+
+# ---------------------------------------------------------------------------
 # Library target (native: full flow with Hermes + libcurl)
 # ---------------------------------------------------------------------------
 
@@ -145,6 +187,30 @@ add_custom_command(
 )
 add_custom_target(_gen_bg_full_hdr DEPENDS ${_bg_full_hdr})
 
+# ---------------------------------------------------------------------------
+# Embed the tiny decipher-only bundle (~1 KB) into a generated header. nsig
+# extraction is done natively in C++ (src/nsig_extract.cpp) using Hermes's own
+# parser, so meriyah is no longer embedded — this bundle only evaluates the
+# extracted decipher script and transforms `n`. Regenerate with
+# tools/nsig_bundle/build_decipher.mjs. Exposes __epo_setupNsig / __epo_decipherN.
+# ---------------------------------------------------------------------------
+set(_nsig_src ${CMAKE_CURRENT_SOURCE_DIR}/src/nsig_decipher.min.js)
+set(_nsig_hdr ${CMAKE_BINARY_DIR}/_generated/nsig_bundle.h)
+
+add_custom_command(
+    OUTPUT  ${_nsig_hdr}
+    DEPENDS ${_nsig_src}
+    COMMAND ${CMAKE_COMMAND} -E echo "#pragma once" > ${_nsig_hdr}
+    COMMAND ${CMAKE_COMMAND} -E echo "// AUTO-GENERATED from src/nsig_decipher.min.js -- do not edit." >> ${_nsig_hdr}
+    COMMAND ${CMAKE_COMMAND} -E echo "namespace epotoken {" >> ${_nsig_hdr}
+    COMMAND ${CMAKE_COMMAND} -E echo "inline constexpr const char* NSIG_DECIPHER_JS = R\"NSIG_BUNDLE_X9X(" >> ${_nsig_hdr}
+    COMMAND cat ${_nsig_src} >> ${_nsig_hdr}
+    COMMAND ${CMAKE_COMMAND} -E echo ")NSIG_BUNDLE_X9X\";" >> ${_nsig_hdr}
+    COMMAND ${CMAKE_COMMAND} -E echo "} // namespace epotoken" >> ${_nsig_hdr}
+    VERBATIM
+)
+add_custom_target(_gen_nsig_hdr DEPENDS ${_nsig_hdr})
+
 add_library(epotoken STATIC
     src/base64.cpp
     src/http_client.cpp
@@ -153,10 +219,14 @@ add_library(epotoken STATIC
     src/innertube_client.cpp
     src/placeholder.cpp
     src/hermes_runner.cpp
+    src/nsig_runner.cpp
+    src/nsig_extract.cpp
+    src/nsig_client.cpp
     src/epotoken.cpp
     ${_bg_full_hdr}
+    ${_nsig_hdr}
 )
-add_dependencies(epotoken _gen_bg_full_hdr)
+add_dependencies(epotoken _gen_bg_full_hdr _gen_nsig_hdr)
 
 target_include_directories(epotoken
     PUBLIC
@@ -165,6 +235,9 @@ target_include_directories(epotoken
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_BINARY_DIR}/_generated
         ${HERMES_INCLUDE_DIR}
+        ${HERMES_PARSER_INCLUDE_DIR}
+        ${_llvh_src_inc}
+        ${_llvh_bld_inc}
 )
 
 target_link_libraries(epotoken
@@ -173,6 +246,7 @@ target_link_libraries(epotoken
     PRIVATE
         CURL::libcurl
         ${HERMES_LIBRARY}
+        ${HERMES_COMPILER_LIBS}
 )
 
 # ---------------------------------------------------------------------------

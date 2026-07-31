@@ -44,6 +44,9 @@ if (auto* ok = std::get_if<epotoken::po_token_result>(&r)) {
 
 // Cold-start placeholder. Pure compute, no network.
 auto p = generate_placeholder_token("VIDEO_ID");
+
+// Decipher a stream-URL `n` throttling parameter (see NSIG.md).
+auto ns = decipher_nsig("kX3F5oM-2vPqYtLa");
 ```
 
 ### CLI
@@ -52,7 +55,16 @@ auto p = generate_placeholder_token("VIDEO_ID");
 ./build/epotoken_cli
 ./build/epotoken_cli dQw4w9WgXcQ
 ./build/epotoken_cli dQw4w9WgXcQ https://my-cdn/interp.js
+./build/epotoken_cli nsig <n> [base.js-path]   # decipher n (see NSIG.md)
 ```
+
+### nsig deciphering
+
+`decipher_nsig` mirrors YouTube.js's `Player.ts`: it extracts the `n` decipher
+function from `base.js` via an AST analysis (meriyah + `JsAnalyzer`/`JsExtractor`)
+running inside Hermes. A memory-optimized closure selector parses only the nsig
+dependency closure instead of the whole 2.5 MB file (−36% JS heap, identical
+output). See [NSIG.md](NSIG.md) for architecture and benchmarks.
 
 ## 2. Node.js
 

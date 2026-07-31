@@ -1,0 +1,8 @@
+{
+  "name": "epotoken-nsig-bundle",
+  "private": true,
+  "type": "module",
+  "description": "Build the embedded nsig extractor bundle (meriyah + YouTube.js JsAnalyzer/JsExtractor + closure selector) for Hermes.",
+  "scripts": { "build": "node build.mjs", "bench": "node --expose-gc benchmark.mjs ../../.cache/base.js" },
+  "devDependencies": { "meriyah": "^6", "esbuild": "^0.24" }
+}

@@ -18,8 +18,15 @@ struct error {
     std::string code;
 };
 
+struct nsig_result {
+    std::string n;                   // deciphered n query-parameter value
+    std::string player_id;           // player version used
+    int         signature_timestamp = 0;
+};
+
 using po_token_outcome     = std::variant<po_token_result, error>;
 using placeholder_outcome  = std::variant<std::string, error>;
+using nsig_outcome         = std::variant<nsig_result, error>;
 
 } // namespace epotoken
 
@@ -48,3 +55,13 @@ epotoken::placeholder_outcome generate_placeholder_token(
     const std::string& identifier,
     uint8_t client_state = 1
 );
+
+// Deciphers a YouTube stream-URL `n` query parameter (the throttling signature).
+// Discovers the current player, fetches base.js, extracts the nsig decipher
+// function via the embedded meriyah/JsAnalyzer pipeline (memory-optimized closure
+// selection; cached per player version), then transforms `n`.
+epotoken::nsig_outcome decipher_nsig(const std::string& n);
+
+// Same, but against a caller-supplied base.js source (no player network fetch).
+// The extracted decipher script is cached by a hash of player_js.
+epotoken::nsig_outcome decipher_nsig(const std::string& n, const std::string& player_js);
